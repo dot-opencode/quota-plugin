@@ -1,3 +1,5 @@
+/** @jsxImportSource @opentui/solid */
+// The pragma keeps JSX on OpenTUI/Solid when installed without tsconfig.json (Bun defaults to React).
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, Index, onMount, Show, type JSX } from "solid-js"
 import { fileURLToPath } from "node:url"
