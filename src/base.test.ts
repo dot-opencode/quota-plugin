@@ -218,3 +218,18 @@ describe("legacy state keys", () => {
     setStatePath(undefined)
   })
 })
+
+test("getStore upgrades a store left by an older version", async () => {
+  const { getStore, STORE_KEY } = await import("./store.ts")
+  const g = globalThis as any
+  const saved = g[STORE_KEY]
+  g[STORE_KEY] = { accountState: new Map(), minIntervals: {}, loaded: false, statePathSet: false, poller: { config: {}, listeners: new Set() } }
+  try {
+    const s = getStore()
+    expect(s.registry.listeners).toBeInstanceOf(Set)
+    expect(s.registry.sources).toBeInstanceOf(Map)
+    expect(s.rejected).toBeInstanceOf(Map)
+  } finally {
+    g[STORE_KEY] = saved
+  }
+})

@@ -62,13 +62,15 @@ export const STORE_KEY = Symbol.for("opencode-cpa-quota.state")
  */
 export function getStore(): Store {
   const g = globalThis as any
-  return (g[STORE_KEY] ??= {
-    registry: { sources: new Map(), listeners: new Set(), version: 0 },
-    rejected: new Map(),
-    lastAccounts: new Map(),
-    accountState: new Map(),
-    minIntervals: {},
-    loaded: false,
-    statePathSet: false,
-  } satisfies Store)
+  const s = (g[STORE_KEY] ??= {}) as Partial<Store>
+  // The store may have been created by an older plugin version in the same process
+  // (e.g. after an in-place update), so fill in any field it lacks.
+  s.registry ??= { sources: new Map(), listeners: new Set(), version: 0 }
+  s.rejected ??= new Map()
+  s.lastAccounts ??= new Map()
+  s.accountState ??= new Map()
+  s.minIntervals ??= {}
+  s.loaded ??= false
+  s.statePathSet ??= false
+  return s as Store
 }
