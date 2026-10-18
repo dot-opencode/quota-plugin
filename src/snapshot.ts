@@ -1,3 +1,4 @@
+import type { ProviderMeta } from "./source.ts"
 import type { AccountQuota } from "./types.ts"
 
 /** JSON-safe form of AccountQuota: Dates travel as epoch milliseconds. */
@@ -23,6 +24,17 @@ export interface WireSnapshot {
   accounts?: readonly WireAccount[]
   failed: boolean
   rejected?: string
+  providers?: readonly WireProvider[]
+}
+
+export interface WireProvider {
+  id: string
+  name?: string
+  providerIDs?: readonly string[]
+  modelPrefixes?: readonly string[]
+  modelPattern?: string
+  logo?: string
+  backoff?: boolean
 }
 
 export interface Snapshot {
@@ -30,6 +42,7 @@ export interface Snapshot {
   accounts?: AccountQuota[]
   failed: boolean
   rejected?: string
+  providers?: ProviderMeta[]
 }
 
 const ms = (d: Date | undefined) => (d ? d.getTime() : undefined)
@@ -44,6 +57,7 @@ export function toWire(s: Snapshot): WireSnapshot {
     configured: s.configured,
     failed: s.failed,
     rejected: s.rejected,
+    providers: s.providers?.map((p) => clean({ ...p, providerIDs: p.providerIDs && [...p.providerIDs], modelPrefixes: p.modelPrefixes && [...p.modelPrefixes] })),
     accounts: s.accounts?.map((a) =>
       clean({
         provider: a.provider,
@@ -63,6 +77,7 @@ export function fromWire(w: WireSnapshot): Snapshot {
     configured: w.configured,
     failed: w.failed,
     rejected: w.rejected,
+    providers: w.providers?.map((p) => clean({ ...p, providerIDs: p.providerIDs && [...p.providerIDs], modelPrefixes: p.modelPrefixes && [...p.modelPrefixes] })),
     accounts: w.accounts?.map((a) => ({
       provider: a.provider,
       account: a.account,

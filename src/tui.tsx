@@ -2,7 +2,6 @@
 // The pragma keeps JSX on OpenTUI/Solid when installed without tsconfig.json (Bun defaults to React).
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, Index, onMount, Show, type JSX } from "solid-js"
-import { fileURLToPath } from "node:url"
 import { TextAttributes } from "@opentui/core"
 import type { ResolvedTheme } from "@opencode/theme/tui"
 import { QuotaRpc } from "./rpc.ts"
@@ -12,13 +11,13 @@ import {
   compactSegments,
   providerForModel,
   reportGroups,
+  type ProviderMeta,
   type ReportAccount,
   type ReportGroup,
   type Segment,
   type Tone,
 } from "./format.ts"
 
-const logoPath = (id: string) => fileURLToPath(new URL(`../assets/${id}.png`, import.meta.url))
 // Providers whose logo failed to load fall back to the text name.
 const [brokenLogos, setBrokenLogos] = createSignal<Record<string, boolean>>({})
 
@@ -37,11 +36,11 @@ const toneColor = (theme: ResolvedTheme, tone: Tone) => {
 }
 
 /** Provider logo (2x1 cells); falls back to the provider name if the image fails to load. */
-function Logo(props: { id: string; fallback: JSX.Element }) {
+function Logo(props: { id: string; logo?: string; fallback: JSX.Element }) {
   return (
-    <Show when={!brokenLogos()[props.id]} fallback={props.fallback}>
+    <Show when={props.logo && !brokenLogos()[props.id]} fallback={props.fallback}>
       <image
-        source={logoPath(props.id)}
+        source={props.logo}
         width={2}
         height={1}
         fit="fit"
@@ -55,7 +54,7 @@ function Logo(props: { id: string; fallback: JSX.Element }) {
 const BAR_WIDTH = 10
 
 /** Body of the /quota dialog: one block per provider, logo + account header, then window rows. */
-function QuotaReport(props: { theme: () => ResolvedTheme; groups: () => ReportGroup[] }) {
+function QuotaReport(props: { theme: () => ResolvedTheme; groups: () => ReportGroup[]; metas: () => ProviderMeta[] }) {
   const th = () => props.theme()
   // Index (not For): updates arrive as new objects every refresh; keying by position
   // updates rows in place instead of recreating them (and reloading logo images).
@@ -67,7 +66,10 @@ function QuotaReport(props: { theme: () => ResolvedTheme; groups: () => ReportGr
       <box flexDirection="row" height={1} flexShrink={0}>
         <Show when={first} fallback={<text>{"   "}</text>}>
           <Show when={provider()} keyed>
-            {(id) => <Logo id={id} fallback={<text fg={th().text.base}>{`${id} `}</text>} />}
+            {(id) => {
+              const meta = () => props.metas().find((p) => p.id === id)
+              return <Logo id={id} logo={meta()?.logo} fallback={<text fg={th().text.base}>{`${meta()?.name ?? id} `}</text>} />
+            }}
           </Show>
         </Show>
         <text fg={th().text.base} attributes={TextAttributes.BOLD} wrapMode="none">{a().account}</text>
@@ -130,6 +132,7 @@ export default Plugin.define({
     const [unavailable, setUnavailable] = createSignal(false)
     const accounts = () => snapshot()?.accounts
     const rejected = () => snapshot()?.rejected
+    const metas = (): ProviderMeta[] => snapshot()?.providers ?? []
 
     // Fetching and polling live in the server plugin; this side only displays what it sends.
     const api = context.client.rpc(QuotaRpc)
@@ -144,9 +147,9 @@ export default Plugin.define({
       try {
         // Prompt's selected model (reactive, updates before the next message is sent).
         const selected = context.ui.model?.current?.()
-        if (selected) return providerForModel(selected.modelID, selected.providerID)
+        if (selected) return providerForModel(metas(), selected.modelID, selected.providerID)
         const model = sessionID ? context.data.session.get(sessionID)?.model : undefined
-        return providerForModel(model?.id, model?.providerID)
+        return providerForModel(metas(), model?.id, model?.providerID)
       } catch {
         return undefined
       }
@@ -163,7 +166,7 @@ export default Plugin.define({
           if (why) return [{ text: `quota: ${why}, paused — /quota to retry`, tone: "critical" }]
           const data = accounts()
           if (!data) return [{ text: "quota …", tone: "stale" }]
-          const list = compactSegments(data, currentProvider(input.sessionID))
+          const list = compactSegments(metas(), data, currentProvider(input.sessionID))
           return list.length ? list : [{ text: snap?.failed ? "quota: n/a" : "", tone: "stale" }]
         }
         // context.theme is reactive: colors follow theme and light/dark switches.
@@ -175,7 +178,7 @@ export default Plugin.define({
             <Index each={segments()}>
               {(s) => (
                 <Show when={s().provider} keyed fallback={textOf(s)}>
-                  {(id) => <Logo id={id} fallback={textOf(s)} />}
+                  {(id) => <Logo id={id} logo={metas().find((p) => p.id === id)?.logo} fallback={textOf(s)} />}
                 </Show>
               )}
             </Index>
@@ -208,7 +211,7 @@ export default Plugin.define({
       context.ui.dialog.show(() => {
         const theme = () => context.theme.surface("dialog")
         // Follows background refreshes while open.
-        const groups = () => reportGroups(accounts() ?? [])
+        const groups = () => reportGroups(metas(), accounts() ?? [])
         // Message shown instead of the report (no data to show).
         const message = (): string | undefined => {
           if (accounts()) return undefined
@@ -240,7 +243,7 @@ export default Plugin.define({
               <text fg={theme().text.muted} onMouseUp={close}>esc</text>
             </box>
             <box paddingBottom={1} flexShrink={0}>
-              <Show when={message()} fallback={<QuotaReport theme={theme} groups={groups} />}>
+              <Show when={message()} fallback={<QuotaReport theme={theme} groups={groups} metas={metas} />}>
                 {(m) => <text fg={loading() ? theme().text.muted : theme().text.base}>{m()}</text>}
               </Show>
             </box>

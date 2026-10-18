@@ -18,11 +18,22 @@ const Account = Schema.Struct({
   staleReason: Schema.optional(Schema.String),
 })
 
+const Provider = Schema.Struct({
+  id: Schema.String,
+  name: Schema.optional(Schema.String),
+  providerIDs: Schema.optional(Schema.Array(Schema.String)),
+  modelPrefixes: Schema.optional(Schema.Array(Schema.String)),
+  modelPattern: Schema.optional(Schema.String),
+  logo: Schema.optional(Schema.String),
+  backoff: Schema.optional(Schema.Boolean),
+})
+
 const SnapshotStruct = Schema.Struct({
   configured: Schema.Boolean,
   accounts: Schema.optional(Schema.Array(Account)),
   failed: Schema.Boolean,
   rejected: Schema.optional(Schema.String),
+  providers: Schema.optional(Schema.Array(Provider)),
 })
 
 // The RPC contract must be portable (Standard Schema), so wrap the Effect schemas.

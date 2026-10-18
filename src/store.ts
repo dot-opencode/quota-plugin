@@ -1,5 +1,5 @@
-import type { Api } from "./api.ts"
-import type { Config } from "./config.ts"
+import type { FetchAllResult } from "./base.ts"
+import type { QuotaSource } from "./source.ts"
 import type { Snapshot } from "./snapshot.ts"
 import type { AccountQuota } from "./types.ts"
 
@@ -18,20 +18,35 @@ export interface AccountState {
 export type Listener = (s: Snapshot) => Promise<void>
 
 export interface Poller {
-  config: Config
-  api?: Api
+  /** Identity of the built-in CPA source config (url|key|refreshSec); undefined when CPA isn't configured. */
+  configKey: string
+  refreshSec: number
+  unregisterCpa?: () => void
+  offRegistry?: () => void
   snapshot: Snapshot
   timer?: ReturnType<typeof setInterval>
   inflight?: Promise<void>
   listeners: Set<Listener>
 }
 
+export interface Registry {
+  sources: Map<string, QuotaSource>
+  listeners: Set<() => void>
+  /** Bumped on every register/unregister; invalidates the result cache. */
+  version: number
+}
+
 export interface Store {
-  // providers.ts
+  registry: Registry
+  // base.ts
+  /** Sources stopped by `fatal`, id → message. */
+  rejected: Map<string, string>
+  /** Last accounts per source, shown while a source is rejected or unlistable. */
+  lastAccounts: Map<string, AccountQuota[]>
   accountState: Map<string, AccountState>
   minIntervals: Record<string, number>
-  cache?: { at: number; key: string; data: AccountQuota[] }
-  inflight?: { key: string; p: Promise<AccountQuota[]> }
+  cache?: { at: number; version: number; data: FetchAllResult }
+  inflight?: { version: number; p: Promise<FetchAllResult> }
   loaded: boolean
   statePath?: string
   statePathSet: boolean
@@ -48,6 +63,9 @@ export const STORE_KEY = Symbol.for("opencode-cpa-quota.state")
 export function getStore(): Store {
   const g = globalThis as any
   return (g[STORE_KEY] ??= {
+    registry: { sources: new Map(), listeners: new Set(), version: 0 },
+    rejected: new Map(),
+    lastAccounts: new Map(),
     accountState: new Map(),
     minIntervals: {},
     loaded: false,

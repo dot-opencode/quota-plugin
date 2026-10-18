@@ -18,19 +18,42 @@
   // Formatting (port of src/format.ts)
   // ---------------------------------------------------------------------------
 
-  const PROVIDERS = ["claude", "codex", "antigravity", "kimi"]
+  // Fallback for servers that don't send snapshot.providers.
+  const DEFAULT_PROVIDERS = [
+    { id: "claude", providerIDs: ["claude"], modelPrefixes: ["claude"] },
+    { id: "codex", providerIDs: ["codex"], modelPrefixes: ["gpt", "codex"], modelPattern: "^o[134](\\b|-|$)" },
+    { id: "antigravity", providerIDs: ["antigravity"], modelPrefixes: ["gemini"] },
+    { id: "kimi", providerIDs: ["kimi"], modelPrefixes: ["kimi"] },
+  ]
   const LOGOS = logoData() // provider id → data: URL (generated block at the end of the file)
   const WARN_BELOW = 20
   const CRITICAL_BELOW = 5
 
+  /** Provider metadata from the snapshot (old servers: built-in list). */
+  const metas = () => {
+    const p = state.snapshot && state.snapshot.providers
+    return Array.isArray(p) && p.length ? p : DEFAULT_PROVIDERS
+  }
+  const displayName = (id) => {
+    const p = metas().find((x) => x.id === id)
+    return (p && p.name) || id
+  }
+  const providerOrder = (accounts) => [...new Set([...metas().map((p) => p.id), ...accounts.map((a) => a.provider)])]
+
   /** Maps the composer's model button text ("Claude Opus", "GPT-5") to a provider id. */
   function providerForModel(text) {
     const m = (text || "").trim().toLowerCase().split("/").pop().replace(/\s+/g, "-")
-    if (PROVIDERS.includes(m)) return m
-    if (m.startsWith("claude")) return "claude"
-    if (m.startsWith("gpt") || m.startsWith("codex") || /^o[134](\b|-|$)/.test(m)) return "codex"
-    if (m.startsWith("gemini")) return "antigravity"
-    if (m.startsWith("kimi")) return "kimi"
+    if (!m) return undefined
+    const list = metas()
+    const byId = list.find((p) => p.id === m || (p.providerIDs && p.providerIDs.includes(m)))
+    if (byId) return byId.id
+    for (const p of list) if (p.modelPrefixes && p.modelPrefixes.some((x) => m.startsWith(String(x).toLowerCase()))) return p.id
+    for (const p of list) {
+      if (!p.modelPattern) continue
+      try {
+        if (new RegExp(p.modelPattern, "i").test(m)) return p.id
+      } catch {}
+    }
     return undefined
   }
 
@@ -78,13 +101,14 @@
 
   /** Active provider first with every account; others show only their most-depleted account. */
   function compactSegments(accounts, active, now) {
-    const providers = active ? [active, ...PROVIDERS.filter((p) => p !== active)] : PROVIDERS
+    const known = providerOrder(accounts)
+    const providers = active ? [active, ...known.filter((p) => p !== active)] : known
     const out = []
     for (const p of providers) {
       const accts = accounts.filter((a) => a.provider === p)
       if (!accts.length) continue
       if (out.length) out.push(seg("  ", "label"))
-      out.push({ text: `${p} `, tone: "provider", provider: p })
+      out.push({ text: `${displayName(p)} `, tone: "provider", provider: p })
       if (p === active && accts.length > 1) {
         accts.forEach((a, i) => {
           if (i > 0) out.push(seg(" / ", "label"))
@@ -99,7 +123,7 @@
   }
 
   function reportGroups(accounts, now) {
-    const order = new Set([...PROVIDERS, ...accounts.map((a) => a.provider)])
+    const order = providerOrder(accounts)
     const groups = []
     for (const provider of order) {
       const accts = accounts.filter((a) => a.provider === provider)
@@ -336,9 +360,9 @@
   function logo(provider, fallback) {
     if (!hasLogo(provider)) return fallback()
     const span = el("span", `cpa-quota-logo cpa-quota-logo-${provider}`)
-    span.title = provider
+    span.title = displayName(provider)
     span.setAttribute("role", "img")
-    span.setAttribute("aria-label", provider)
+    span.setAttribute("aria-label", displayName(provider))
     span.innerHTML = LOGOS[provider] // trusted, generated constant
     return span
   }
@@ -391,7 +415,7 @@
       const prov = el("span", "cpa-quota-prov")
       const img = logo(provider, () => {
         prov.classList.remove("cpa-quota-prov-logo")
-        return document.createTextNode(provider)
+        return document.createTextNode(displayName(provider))
       })
       if (img.nodeType === 1) prov.classList.add("cpa-quota-prov-logo")
       prov.append(img)

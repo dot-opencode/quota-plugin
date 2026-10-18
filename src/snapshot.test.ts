@@ -28,3 +28,10 @@ test("unconfigured / rejected snapshot", () => {
   expect(wire).toEqual({ configured: false, failed: true, rejected: "invalid key (401)" })
   expect(fromWire(wire).accounts).toBeUndefined()
 })
+
+test("providers survive the wire", () => {
+  const providers = [{ id: "x", name: "X", providerIDs: ["x"], modelPrefixes: ["x-"], backoff: false }, { id: "y" }]
+  const wire = JSON.parse(JSON.stringify(toWire({ configured: true, failed: false, providers })))
+  expect(wire.providers).toEqual(providers)
+  expect(fromWire(wire).providers).toEqual(providers)
+})

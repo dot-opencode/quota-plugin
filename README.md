@@ -6,7 +6,9 @@ Requirements: OpenCode V2, a CLIProxyAPI instance with the management API enable
 
 ## Architecture
 
-- **Server plugin** (`server.ts` → `src/server.ts`) reads the env/options, fetches and polls quotas, handles backoff and 401/403 pausing, and publishes snapshots over RPC (`cpa-quota`: method `get`, event `changed`; contract in `src/rpc.ts`).
+- **Base** (`src/base.ts`, `src/server.ts`): generic and source-agnostic. Polling timer, 30 s result cache (`force` skips it), in-flight dedupe, per-account backoff (5 min doubling to 30 min, or `Retry-After`), per-provider min interval, and persisted state (keys `source:provider:key`; legacy `provider:auth_index` keys migrate to `cpa:`). It publishes snapshots over RPC (`cpa-quota`: method `get`, event `changed`; contract in `src/rpc.ts`). The snapshot carries `accounts`, `providers` (metadata of all registered sources) and `rejected` (e.g. `cpa: invalid key (401)`).
+- **Sources** (`src/source.ts`, public as `opencode-cpa-quota/source`): a `QuotaSource` lists accounts and fetches quotas for them; sources are independent (one failing never blocks another). The registry lives on `globalThis`, see below.
+- **Built-in CPA source** (`src/sources/cpa/`): the CLIProxyAPI implementation (management API client, Claude/Codex/Antigravity/Kimi parsers). The server plugin registers it when both the URL and key are present.
 - **TUI plugin** (`tui.tsx` → `src/tui.tsx`) only displays: it calls `get` once, listens to `changed`, and `/quota` calls `get({ force: true })`. If the server plugin isn't loaded, the footer shows `quota: n/a`.
 
 The env vars below are read by the server plugin (the OpenCode server process).
@@ -44,8 +46,40 @@ upstream request, so restarts and other processes sharing the file see the same 
 The server loads the plugin many times (each copy gets its own module instance), so all
 mutable state lives in one store on `globalThis[Symbol.for("opencode-cpa-quota.state")]`:
 one poller and one timer per process, regardless of the number of projects or copies.
-On 401/403 from the management API, polling stops (the proxy bans an IP after
+On 401/403 from the management API, the CPA source stops being polled (the proxy bans an IP after
 5 failed attempts); run `/quota` to retry.
+
+## Custom sources
+
+Other OpenCode plugins can add their own quota providers. A source implements `QuotaSource` from `opencode-cpa-quota/source`:
+
+- `id`, `providers` (`ProviderMeta[]`: `id`, optional `name`, `providerIDs`, `modelPrefixes`, `modelPattern`, `logo` (absolute png path), `backoff`; `backoff: false` makes the base skip backoff and min-interval filtering for that provider);
+- `listAccounts()` → `AccountRef[]` (`provider`, stable `key`, display `account`, optional `data`);
+- `fetch(refs)` → `Map<ref.key, FetchResult>`: either quota data (`plan?`, `windows`, ...) or `{ error, retryAfterMs? }`. A missing key counts as an error. Accounts that are in backoff are not passed to `fetch`;
+- optional `fatal(e)`: return a message for errors that must stop polling the source (e.g. a bad key); it appears in `snapshot.rejected` as `<id>: <message>` until a forced refresh succeeds.
+
+Minimal plugin, in its own package:
+
+```ts
+import { Plugin } from "@opencode/plugin"
+import { registerQuotaSource } from "opencode-cpa-quota/source"
+
+export default Plugin.define({
+  id: "my-quota",
+  setup: async () => {
+    const unregister = registerQuotaSource({
+      id: "my-service",
+      providers: [{ id: "myservice", name: "My Service", providerIDs: ["myservice"], modelPrefixes: ["my-"] }],
+      listAccounts: async () => [{ provider: "myservice", key: "main", account: "me@example.com" }],
+      fetch: async (refs) =>
+        new Map(refs.map((r) => [r.key, { windows: [{ label: "5h", remainingPct: 80 }] }])),
+    })
+    return unregister // cleanup
+  },
+})
+```
+
+Registering a source with an existing id replaces it. The registry is stored on `globalThis[Symbol.for("opencode-cpa-quota.state")]`, so registration works even when your plugin and this one load separate module copies. The base polls as soon as a source is registered and drops its accounts when it is unregistered.
 
 ## Usage
 

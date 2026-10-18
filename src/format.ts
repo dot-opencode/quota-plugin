@@ -1,16 +1,28 @@
+import type { ProviderMeta } from "./source.ts"
 import type { AccountQuota, QuotaWindow } from "./types.ts"
 
-const PROVIDERS = ["claude", "codex", "antigravity", "kimi"]
+export type { ProviderMeta }
 
-export function providerForModel(modelID?: string, providerID?: string): string | undefined {
-  if (providerID && PROVIDERS.includes(providerID)) return providerID
+export function providerForModel(providers: readonly ProviderMeta[], modelID?: string, providerID?: string): string | undefined {
+  if (providerID) {
+    const p = providers.find((p) => p.id === providerID || p.providerIDs?.includes(providerID))
+    if (p) return p.id
+  }
   const m = (modelID ?? "").toLowerCase().split("/").pop() ?? ""
-  if (m.startsWith("claude")) return "claude"
-  if (m.startsWith("gpt") || m.startsWith("codex") || /^o[134](\b|-|$)/.test(m)) return "codex"
-  if (m.startsWith("gemini")) return "antigravity"
-  if (m.startsWith("kimi")) return "kimi"
+  if (!m) return undefined
+  for (const p of providers) if (p.modelPrefixes?.some((x) => m.startsWith(x.toLowerCase()))) return p.id
+  for (const p of providers) {
+    if (!p.modelPattern) continue
+    try {
+      if (new RegExp(p.modelPattern, "i").test(m)) return p.id
+    } catch {
+      // invalid pattern: ignore
+    }
+  }
   return undefined
 }
+
+const displayName = (providers: readonly ProviderMeta[], id: string) => providers.find((p) => p.id === id)?.name ?? id
 
 export function formatReset(resetsAt: Date, now = Date.now()): string {
   const mins = Math.max(0, Math.round((resetsAt.getTime() - now) / 60000))
@@ -60,6 +72,11 @@ export function toneFor(remainingPct: number): Tone {
 
 const seg = (text: string, tone: Tone): Segment => ({ text, tone })
 
+/** Provider ids in metadata order, then providers seen only in accounts. */
+const providerOrder = (metas: readonly ProviderMeta[], accounts: AccountQuota[]): string[] => [
+  ...new Set([...metas.map((p) => p.id), ...accounts.map((a) => a.provider)]),
+]
+
 function windowSegments(ws: QuotaWindow[], now: number): Segment[] {
   const out: Segment[] = []
   mainWindows(ws).forEach((w, i) => {
@@ -83,16 +100,20 @@ function accountSegments(a: AccountQuota | undefined, now: number): Segment[] {
  * All providers on one line. The active provider (if any) goes first and shows
  * every account; other providers show only their most-depleted account.
  */
-export function compactSegments(accounts: AccountQuota[], activeProvider?: string, now = Date.now()): Segment[] {
-  const providers = activeProvider
-    ? [activeProvider, ...PROVIDERS.filter((p) => p !== activeProvider)]
-    : PROVIDERS
+export function compactSegments(
+  metas: readonly ProviderMeta[],
+  accounts: AccountQuota[],
+  activeProvider?: string,
+  now = Date.now(),
+): Segment[] {
+  const known = providerOrder(metas, accounts)
+  const order = activeProvider ? [activeProvider, ...known.filter((p) => p !== activeProvider)] : known
   const out: Segment[] = []
-  for (const p of providers) {
+  for (const p of order) {
     const accts = accounts.filter((a) => a.provider === p)
     if (!accts.length) continue
     if (out.length) out.push(seg(" ", "label"))
-    out.push({ ...seg(`${p} `, "provider"), provider: p })
+    out.push({ ...seg(`${displayName(metas, p)} `, "provider"), provider: p })
     if (p === activeProvider && accts.length > 1) {
       // Accounts of one provider are separated by " / " (providers by spaces).
       accts.forEach((a, i) => {
@@ -108,8 +129,13 @@ export function compactSegments(accounts: AccountQuota[], activeProvider?: strin
   return out
 }
 
-export function compactLine(accounts: AccountQuota[], activeProvider?: string, now = Date.now()): string {
-  return compactSegments(accounts, activeProvider, now).map((s) => s.text).join("")
+export function compactLine(
+  metas: readonly ProviderMeta[],
+  accounts: AccountQuota[],
+  activeProvider?: string,
+  now = Date.now(),
+): string {
+  return compactSegments(metas, accounts, activeProvider, now).map((s) => s.text).join("")
 }
 
 export interface ReportWindow {
@@ -137,10 +163,9 @@ export interface ReportGroup {
 }
 
 /** Structured version of fullReport, grouped by provider (known providers first). */
-export function reportGroups(accounts: AccountQuota[], now = Date.now()): ReportGroup[] {
-  const order = [...PROVIDERS, ...accounts.map((a) => a.provider).filter((p) => !PROVIDERS.includes(p))]
+export function reportGroups(metas: readonly ProviderMeta[], accounts: AccountQuota[], now = Date.now()): ReportGroup[] {
   const groups: ReportGroup[] = []
-  for (const provider of new Set(order)) {
+  for (const provider of providerOrder(metas, accounts)) {
     const accts = accounts.filter((a) => a.provider === provider)
     if (!accts.length) continue
     groups.push({
