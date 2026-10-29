@@ -1,4 +1,3 @@
-import type { AuthFile } from "./api.ts"
 import type { AccountQuota, QuotaWindow } from "../../types.ts"
 
 const clamp = (n: number) => Math.max(0, Math.min(100, n))
@@ -18,10 +17,6 @@ const date = (v: unknown): Date | undefined => {
 const pick = (o: any, ...keys: string[]) => {
   for (const k of keys) if (o && o[k] !== undefined && o[k] !== null) return o[k]
   return undefined
-}
-
-export function accountName(f: AuthFile): string {
-  return f.email || f.label || f.name || f.id || f.auth_index
 }
 
 // ---------- claude (from the five-hour-quota-router CPA plugin) ----------
@@ -102,33 +97,6 @@ export function mapRouterAccount(base: { provider: string; account: string }, a:
 }
 
 // ---------- codex ----------
-export function decodeJwtPayload(token: unknown): any {
-  if (typeof token !== "string") return undefined
-  const part = token.split(".")[1]
-  if (!part) return undefined
-  try {
-    const b64 = part.replace(/-/g, "+").replace(/_/g, "/")
-    return JSON.parse(Buffer.from(b64, "base64").toString("utf8"))
-  } catch {
-    return undefined
-  }
-}
-
-export function codexAccountId(f: Pick<AuthFile, "metadata" | "attributes" | "id_token"> & { raw?: any }): string | undefined {
-  for (const src of [f.raw, f.metadata, f.attributes]) {
-    const v = pick(src, "chatgpt_account_id", "account_id")
-    if (typeof v === "string" && v) return v
-  }
-  const candidates = [f.id_token, f.metadata?.id_token, f.attributes?.id_token]
-  for (const c of candidates) {
-    // id_token may be a JWT string or an already-decoded object
-    const payload = typeof c === "object" && c ? c : decodeJwtPayload(c)
-    const id = payload?.["https://api.openai.com/auth"]?.chatgpt_account_id ?? payload?.chatgpt_account_id
-    if (typeof id === "string" && id) return id
-  }
-  return undefined
-}
-
 function codexLabel(seconds: number | undefined, fallback: string): string {
   if (seconds === 18000) return "5h"
   if (seconds === 604800) return "7d"
@@ -182,74 +150,3 @@ export function parseCodex(body: any): { plan?: string; windows: QuotaWindow[] }
   const plan = pick(body, "plan_type", "planType")
   return { plan: typeof plan === "string" ? plan : undefined, windows }
 }
-
-// ---------- antigravity ----------
-export function parseAntigravity(body: any): QuotaWindow[] {
-  const out: QuotaWindow[] = []
-  const groups = pick(body, "groups")
-  if (!Array.isArray(groups)) return out
-  for (const g of groups) {
-    const name = pick(g, "displayName", "display_name") ?? ""
-    const buckets = pick(g, "buckets")
-    if (!Array.isArray(buckets)) continue
-    for (const b of buckets) {
-      const frac = num(pick(b, "remainingFraction", "remaining_fraction"))
-      if (frac === undefined) continue
-      const window = pick(b, "window") ?? ""
-      out.push({
-        label: `${name} ${window}`.trim(),
-        remainingPct: clamp(frac * 100),
-        resetsAt: date(pick(b, "resetTime", "reset_time")),
-      })
-    }
-  }
-  return out
-}
-
-export const AG_HOSTS = [
-  "daily-cloudcode-pa.googleapis.com",
-  "daily-cloudcode-pa.sandbox.googleapis.com",
-  "cloudcode-pa.googleapis.com",
-]
-export const AG_HEADERS = {
-  Authorization: "Bearer $TOKEN$",
-  "Content-Type": "application/json",
-  "User-Agent": "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)",
-}
-
-// ---------- kimi ----------
-function kimiWindow(label: string, d: any): QuotaWindow | undefined {
-  const limit = num(d?.limit)
-  const remaining = num(d?.remaining)
-  if (limit === undefined || remaining === undefined || limit <= 0) return undefined
-  return { label, remainingPct: clamp((remaining / limit) * 100), resetsAt: date(pick(d, "resetTime", "reset_time")) }
-}
-
-function kimiLabel(win: any): string {
-  const dur = num(win?.duration)
-  const unit = String(win?.timeUnit ?? win?.time_unit ?? "").toUpperCase()
-  if (dur === undefined) return "limit"
-  let minutes: number | undefined
-  if (unit.includes("MINUTE")) minutes = dur
-  else if (unit.includes("HOUR")) minutes = dur * 60
-  else if (unit.includes("DAY")) minutes = dur * 1440
-  if (minutes === undefined) return `${dur} ${unit.toLowerCase()}`.trim()
-  if (minutes === 300) return "5h"
-  if (minutes % 1440 === 0) return `${minutes / 1440}d`
-  if (minutes % 60 === 0) return `${minutes / 60}h`
-  return `${minutes}m`
-}
-
-export function parseKimi(body: any): QuotaWindow[] {
-  const out: QuotaWindow[] = []
-  const weekly = kimiWindow("7d", body?.usage)
-  const limits = Array.isArray(body?.limits) ? body.limits : []
-  for (const l of limits) {
-    const w = kimiWindow(kimiLabel(l?.window), l?.detail)
-    if (w) out.push(w)
-  }
-  if (weekly) out.push(weekly)
-  // 5h first, then others, weekly stays after
-  return out.sort((a, b) => (a.label === "5h" ? -1 : b.label === "5h" ? 1 : 0))
-}
-

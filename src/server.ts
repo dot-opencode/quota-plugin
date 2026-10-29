@@ -28,8 +28,7 @@ function startPolling(p: Poller) {
   p.timer = setInterval(() => void refresh(p), p.refreshSec * 1000)
 }
 
-// A source rejected by `fatal` (e.g. 401/403) is skipped until a forced get succeeds,
-// so a bad key can't trip the proxy's 5-failures-per-IP ban.
+// A source rejected by a custom source's `fatal` hook is skipped until a forced get succeeds.
 async function run(p: Poller, force: boolean) {
   const configured = hasSources()
   try {
@@ -62,7 +61,7 @@ function onRegistryChange(p: Poller) {
   }
 }
 
-/** Both the management URL and key are required; without either no CPA source is registered. */
+/** Both the CPA URL and quota key are required; without either no CPA source is registered. */
 function registerCpa(config: Config): (() => void) | undefined {
   return config.url && config.key ? registerQuotaSource(createCpaSource(createApi({ url: config.url, key: config.key }))) : undefined
 }

@@ -1,14 +1,14 @@
 # opencode-cpa-quota
 
-OpenCode V2 plugin (server + TUI): shows subscription quotas (Claude, Codex, Antigravity, Kimi) from a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) management API in the prompt footer.
+OpenCode V2 plugin (server + TUI): shows subscription quotas (Claude, Codex) from a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance in the prompt footer.
 
-Requirements: OpenCode V2, a CLIProxyAPI instance with the management API enabled, and (for Claude) the `five-hour-quota-router` CPA plugin.
+Requirements: OpenCode V2, a CLIProxyAPI instance with the (updated) `five-hour-quota-router` CPA plugin, whose quota route this plugin reads. Its CPA config needs `plugins.configs.five-hour-quota-router.quota-api-keys: [...]`; the key you put there is `CPA_QUOTA_KEY`.
 
 ## Architecture
 
 - **Base** (`src/base.ts`, `src/server.ts`): generic and source-agnostic. Polling timer, 30 s result cache (`force` skips it), in-flight dedupe, per-account backoff (5 min doubling to 30 min, or `Retry-After`), per-provider min interval, and persisted state (keys `source:provider:key`; legacy `provider:auth_index` keys migrate to `cpa:`). It publishes snapshots over RPC (`cpa-quota`: method `get`, event `changed`; contract in `src/rpc.ts`). The snapshot carries `accounts`, `providers` (metadata of all registered sources) and `rejected` (e.g. `cpa: invalid key (401)`).
 - **Sources** (`src/source.ts`, public as `opencode-cpa-quota/source`): a `QuotaSource` lists accounts and fetches quotas for them; sources are independent (one failing never blocks another). The registry lives on `globalThis`, see below.
-- **Built-in CPA source** (`src/sources/cpa/`): the CLIProxyAPI implementation (management API client, Claude/Codex/Antigravity/Kimi parsers). The server plugin registers it when both the URL and key are present.
+- **Built-in CPA source** (`src/sources/cpa/`): the CLIProxyAPI implementation (quota route client, Claude/Codex parsers). The server plugin registers it when both the URL and key are present.
 - **TUI plugin** (`tui.tsx` → `src/tui.tsx`) only displays: it calls `get` once, listens to `changed`, and `/quota` calls `get({ force: true })`. If the server plugin isn't loaded, the footer shows `quota: n/a`.
 
 The env vars below are read by the server plugin (the OpenCode server process).
@@ -29,25 +29,26 @@ For a local checkout, run `bun install` in the plugin dir (dev deps only; Solid/
 
 ## Env
 
-- `CPA_MANAGEMENT_URL` (required unless the `url` option is set) — base URL of the CLIProxyAPI server, e.g. `https://cpa.example.com`.
-- `CPA_MANAGEMENT_KEY` (required) — management API key.
+- `CPA_URL` (required unless the `url` option is set) — base URL of the CLIProxyAPI server, e.g. `https://cpa.example.com`.
+- `CPA_QUOTA_KEY` (required) — one of the keys in `plugins.configs.five-hour-quota-router.quota-api-keys`.
 
-Plugin options: `url` (overrides `CPA_MANAGEMENT_URL`), `refreshSec` (default 300, minimum 30). Without a URL or key the footer shows `quota: set CPA_MANAGEMENT_URL and CPA_MANAGEMENT_KEY`.
+Plugin options: `url` (overrides `CPA_URL`), `refreshSec` (default 300, minimum 30). Without a URL or key the footer shows `quota: set CPA_URL and CPA_QUOTA_KEY`.
 
-Claude values come from the `five-hour-quota-router` CPA plugin status
-(`GET {url}/v0/management/plugins/five-hour-quota-router/status`, one request per poll,
-matched by `auth_index`); the plugin never calls Anthropic. Codex, Antigravity and Kimi
-go through the management `api-call`. When such a usage endpoint fails (e.g. 429), the
-last known values stay on screen, and that account is retried after 5 min, doubling up to
-30 min (or the upstream `Retry-After`, if longer). `/quota` skips the 30 s result cache but
+Both providers come from one request per poll:
+`GET {url}/v0/resource/plugins/five-hour-quota-router/quota` with `Authorization: Bearer <CPA_QUOTA_KEY>`.
+The response is `{ "claude": <router status>, "codex": [{ auth_index, email?, label?, usage?, error?, retry_after_ms?, fetched_at? }] }`;
+accounts come from the response (keyed by `auth_index`), and Codex `usage` is the raw
+`wham/usage` JSON. `401` shows `CPA quota key rejected (401)`, `404` means the
+`five-hour-quota-router` plugin must be updated and `quota-api-keys` configured; polling
+continues normally in both cases. When a Codex entry carries an `error` (e.g. 429), its last
+known values stay on screen, and that account is retried after 5 min, doubling up to
+30 min (or `retry_after_ms`, if longer). `/quota` skips the 30 s result cache but
 respects these pauses. This state is persisted in
 `${XDG_CACHE_HOME:-~/.cache}/opencode-cpa-quota/state.json` and re-read before each
-upstream request, so restarts and other processes sharing the file see the same pauses.
+refresh, so restarts and other processes sharing the file see the same pauses.
 The server loads the plugin many times (each copy gets its own module instance), so all
 mutable state lives in one store on `globalThis[Symbol.for("opencode-cpa-quota.state")]`:
 one poller and one timer per process, regardless of the number of projects or copies.
-On 401/403 from the management API, the CPA source stops being polled (the proxy bans an IP after
-5 failed attempts); run `/quota` to retry.
 
 ## Custom sources
 

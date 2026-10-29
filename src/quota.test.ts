@@ -16,9 +16,7 @@ describe("format", () => {
     expect(providerForModel(P, "claude-opus-4")).toBe("claude")
     expect(providerForModel(P, "gpt-5")).toBe("codex")
     expect(providerForModel(P, "o3-mini")).toBe("codex")
-    expect(providerForModel(P, "gemini-3-pro")).toBe("antigravity")
-    expect(providerForModel(P, "kimi-k2")).toBe("kimi")
-    expect(providerForModel(P, "foo", "kimi")).toBe("kimi")
+    expect(providerForModel(P, "foo", "codex")).toBe("codex")
     expect(providerForModel(P, "foo", "bar")).toBeUndefined()
   })
   test("compactLine single & multi", () => {
@@ -53,8 +51,8 @@ describe("format", () => {
     expect(toneFor(4.9)).toBe("critical")
   })
   test("compactLine all providers uses worst account", () => {
-    const line = compactLine(P, [acc("claude", "a", 64, 95), acc("claude", "b", 10, 90), acc("kimi", "k", 50, 50)])
-    expect(line).toBe("claude 5h 10% · 7d 90% kimi 5h 50% · 7d 50%")
+    const line = compactLine(P, [acc("claude", "a", 64, 95), acc("claude", "b", 10, 90), acc("codex", "k", 50, 50)])
+    expect(line).toBe("claude 5h 10% · 7d 90% codex 5h 50% · 7d 50%")
   })
   test("custom providers: matching, order, name", () => {
     const M: ProviderMeta[] = [

@@ -2,13 +2,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { ApiError, createApi, parseRetryAfter, isAuthRejection, normalizeProvider, parseAuthFiles, type Api } from "./api.ts"
+import { ApiError, createApi, type Api, type CodexEntry } from "./api.ts"
 import { loadConfig } from "./config.ts"
 import { compactLine } from "../../format.ts"
 import { backoffMs, clearCache, fetchAllQuotas as fetchAll, setMinInterval, setStatePath } from "../../base.ts"
 import { registerQuotaSource } from "../../source.ts"
 import { getStore } from "../../store.ts"
-import { codexAccountId, parseAntigravity, mapRouterAccount, parseCodex, parseKimi } from "./parsers.ts"
+import { mapRouterAccount, parseCodex } from "./parsers.ts"
 import { createCpaSource, CPA_PROVIDERS } from "./index.ts"
 import type { AccountQuota } from "../../types.ts"
 
@@ -23,9 +23,6 @@ const fetchAllQuotas = async (api: Api, _key = "", force = false, now = Date.now
 
 // Never touch the real home dir: persistence is off unless a test sets a temp path.
 setStatePath(undefined)
-
-const jwt = (payload: object) =>
-  `h.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.s`
 
 describe("providers", () => {
   test("codex", () => {
@@ -64,60 +61,16 @@ describe("providers", () => {
     expect(r.windows[0]!.label).toBe("30d")
     expect(r.windows[0]!.remainingPct).toBe(0)
   })
-
-  test("antigravity", () => {
-    const w = parseAntigravity({
-      groups: [{ displayName: "Gemini Pro", buckets: [{ window: "5h", remainingFraction: 0.5, resetTime: "2026-10-08T12:00:00Z" }] },
-        { display_name: "Flash", buckets: [{ window: "7d", remaining_fraction: 1 }] }],
-    })
-    expect(w.map((x) => [x.label, x.remainingPct])).toEqual([["Gemini Pro 5h", 50], ["Flash 7d", 100]])
-    expect(parseAntigravity({ groups: [] })).toEqual([])
-  })
-
-  test("kimi", () => {
-    const w = parseKimi({
-      usage: { limit: 100, remaining: 80, resetTime: "2026-10-10T00:00:00Z" },
-      limits: [{ window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" }, detail: { limit: 10, remaining: 5 } }],
-    })
-    expect(w.map((x) => [x.label, x.remainingPct])).toEqual([["5h", 50], ["7d", 80]])
-  })
-
-  test("jwt account id", () => {
-    const token = jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acc-1" } })
-    expect(codexAccountId({ id_token: token })).toBe("acc-1")
-    expect(codexAccountId({ id_token: undefined, metadata: { account_id: "m-1" } })).toBe("m-1")
-    expect(codexAccountId({ id_token: "garbage" })).toBeUndefined()
-  })
 })
 
 describe("api", () => {
-  test("normalizeProvider", () => {
-    expect(normalizeProvider("Anthropic")).toBe("claude")
-    expect(normalizeProvider("anti_gravity")).toBe("antigravity")
-    expect(normalizeProvider("grok")).toBe("xai")
-    expect(normalizeProvider("x_ai")).toBe("xai")
-  })
-  test("parseAuthFiles", () => {
-    const f = parseAuthFiles({
-      files: [
-        { name: "a", type: "anthropic", auth_index: "1" },
-        { name: "b", provider: "codex", authIndex: "2", disabled: true },
-        { name: "c", provider: "codex" },
-        { name: "d", account_type: "kimi", auth_index: "4", email: "x@y" },
-      ],
-    })
-    expect(f.map((x) => [x.provider, x.auth_index])).toEqual([["claude", "1"], ["kimi", "4"]])
-  })
   test("config", () => {
-    expect(loadConfig({}, { CPA_MANAGEMENT_URL: "https://x.io/", CPA_MANAGEMENT_KEY: "k" })).toEqual({ url: "https://x.io", key: "k", refreshSec: 300 })
+    expect(loadConfig({}, { CPA_URL: "https://x.io/", CPA_QUOTA_KEY: "k" })).toEqual({ url: "https://x.io", key: "k", refreshSec: 300 })
     expect(loadConfig({ refreshSec: 30, url: "https://o.io//" }, {}).url).toBe("https://o.io")
-    expect(loadConfig({}, { CPA_MANAGEMENT_KEY: "k" }).url).toBeUndefined()
+    expect(loadConfig({}, { CPA_QUOTA_KEY: "k" }).url).toBeUndefined()
+    expect(loadConfig({}, { CPA_URL: "https://x.io", CPA_MANAGEMENT_KEY: "k" } as any).key).toBeUndefined()
   })
 })
-
-const noRouter = async (): Promise<any> => {
-  throw new Error("routerStatus must not be called")
-}
 
 const acc = (provider: string, account: string, r5: number, r7: number, extra: Partial<AccountQuota> = {}): AccountQuota => ({
   provider,
@@ -126,139 +79,180 @@ const acc = (provider: string, account: string, r5: number, r7: number, extra: P
   ...extra,
 })
 
-describe("auth rejection", () => {
-  const files = [{ provider: "codex", auth_index: "1", raw: {} }]
-  const api = (err: unknown): Api => ({
-    routerStatus: noRouter,
-    listAuthFiles: async () => files,
-    apiCall: async () => {
-      throw err
-    },
+const t0 = Date.parse("2026-10-08T10:00:00Z")
+const usageOf = (used: number, at = t0) => ({
+  rate_limit: {
+    primary_window: { used_percent: used, limit_window_seconds: 18000, reset_at: (at + 60 * 60000) / 1000 },
+    secondary_window: { used_percent: 50, limit_window_seconds: 604800, reset_at: (at + 3 * 86400000) / 1000 },
+  },
+})
+
+interface CodexState {
+  calls: number
+  used: number
+  err?: string
+  retryAfterMs?: number
+  /** Keep usage next to the error (last known values). */
+  withUsage?: boolean
+}
+/** Api whose single quota response carries one codex account driven by `s`. */
+const mkApi = (s: CodexState): Api => ({
+  quota: async () => {
+    s.calls++
+    const e: CodexEntry = { auth_index: "1", email: "a" }
+    if (!s.err || s.withUsage) e.usage = usageOf(s.used)
+    if (s.err) e.error = s.err
+    if (s.retryAfterMs) e.retry_after_ms = s.retryAfterMs
+    return { codex: [e] }
+  },
+})
+const pct5 = (r: AccountQuota[]) => r[0]!.windows.find((w) => w.label === "5h")!.remainingPct
+
+describe("quota route errors", () => {
+  test("401 shows a message and does not stop polling", async () => {
+    clearCache()
+    let n = 0
+    const api: Api = { quota: async () => (n++, Promise.reject(new ApiError("CPA quota key rejected (401)", 401))) }
+    const r = await poll(api, false, t0)
+    expect(r.rejected).toBeUndefined()
+    expect(r.accounts[0]!.error).toBe("CPA quota key rejected (401)")
+    await poll(api, false, t0 + 60_000)
+    expect(n).toBe(2)
   })
 
-  test("management 401/403 propagates so polling can stop", async () => {
+  test("404 asks to update the router plugin and configure quota-api-keys", async () => {
     clearCache()
-    const err = new ApiError("api-call HTTP 403", 403, true)
-    const r = await poll(api(err))
-    expect(r.rejected).toBe("cpa: access denied (403)")
-    clearCache()
-    const listErr = new ApiError("auth-files HTTP 401", 401, true)
-    const bad: Api = { routerStatus: noRouter, listAuthFiles: async () => { throw listErr }, apiCall: async () => null }
-    expect((await poll(bad)).rejected).toBe("cpa: invalid key (401)")
+    const api = createApi({ url: "https://cpa.test", key: "k" }, (async () => new Response("{}", { status: 404 })) as any)
+    const r = await poll(api, true, t0)
+    expect(r.rejected).toBeUndefined()
+    expect(r.accounts[0]!.error).toContain("five-hour-quota-router")
+    expect(r.accounts[0]!.error).toContain("quota-api-keys")
   })
 
-  test("upstream provider 401/403 stays a per-account error", async () => {
+  test("other failures are plain errors", async () => {
     clearCache()
-    const data = await fetchAllQuotas(api(new ApiError("upstream HTTP 401", 401)), "t3", true)
-    expect(data[0]!.error).toContain("upstream HTTP 401")
-    expect(isAuthRejection(new ApiError("x", 403))).toBe(false)
-    expect(isAuthRejection(new ApiError("x", 500, true))).toBe(false)
+    const r = await poll({ quota: async () => { throw new ApiError("quota HTTP 500", 500) } }, true, t0)
+    expect(r.rejected).toBeUndefined()
+    expect(r.failed).toBe(true)
+  })
+
+  test("createApi hits the resource route with the bearer key", async () => {
+    const seen: { url: string; auth: string | null }[] = []
+    const fakeFetch = (async (u: string, init: any) => {
+      seen.push({ url: u, auth: new Headers(init.headers).get("authorization") })
+      return new Response(JSON.stringify({ claude: { accounts: [] }, codex: [] }))
+    }) as any
+    const api = createApi({ url: "https://cpa.test", key: "k" }, fakeFetch)
+    expect(await api.quota()).toEqual({ claude: { accounts: [] }, codex: [] })
+    expect(seen).toEqual([{ url: "https://cpa.test/v0/resource/plugins/five-hour-quota-router/quota", auth: "Bearer k" }])
+    const bad = createApi({ url: "https://cpa.test", key: "k" }, (async () => new Response("", { status: 401 })) as any)
+    await expect(bad.quota()).rejects.toMatchObject({ message: "CPA quota key rejected (401)", status: 401 })
+  })
+})
+
+describe("codex entries", () => {
+  test("usage and error: last known values shown, treated as stale", async () => {
+    clearCache()
+    setMinInterval("codex", undefined)
+    const s: CodexState = { calls: 0, used: 30 }
+    const api = mkApi(s)
+    expect(pct5(await fetchAllQuotas(api, "", true, t0))).toBe(70)
+    s.err = "HTTP 429"
+    s.withUsage = true
+    s.used = 40
+    const r = await fetchAllQuotas(api, "", true, t0 + 60_000)
+    expect(r[0]!.error).toBeUndefined()
+    expect(r[0]!.staleSince).toBeDefined()
+    expect(r[0]!.staleReason).toBe("HTTP 429")
+    expect(pct5(r)).toBe(70)
+    setMinInterval("codex", 15 * 60_000)
+  })
+
+  test("error only: error with retryAfterMs", async () => {
+    clearCache()
+    setMinInterval("codex", undefined)
+    const s: CodexState = { calls: 0, used: 30, err: "upstream HTTP 429", retryAfterMs: 60 * 60_000 }
+    const api = mkApi(s)
+    const first = await fetchAllQuotas(api, "", true, t0)
+    expect(first[0]!.error).toBe("upstream HTTP 429")
+    // Retry-After extends the pause beyond the 5 min backoff.
+    s.err = undefined
+    s.retryAfterMs = undefined
+    expect((await fetchAllQuotas(api, "", true, t0 + 30 * 60_000))[0]!.error).toBe("upstream HTTP 429")
+    expect(pct5(await fetchAllQuotas(api, "", true, t0 + 60 * 60_000 + 1))).toBe(70)
+    setMinInterval("codex", 15 * 60_000)
+  })
+
+  test("accounts come from the response, keyed by auth_index; claude and codex share one request", async () => {
+    clearCache()
+    let n = 0
+    const api: Api = {
+      quota: async () => (
+        n++,
+        {
+          claude: { accounts: [{ auth_index: "c1", windows: [{ scope: "five_hour", percent_used: 10, sampled_at: new Date(t0 - 1000).toISOString() }] }] },
+          codex: [{ auth_index: 7, label: "work", usage: usageOf(20) } as any, { auth_index: "8", email: "e@x", error: "boom" }],
+        }
+      ),
+    }
+    const r = await fetchAllQuotas(api, "", true, t0)
+    expect(n).toBe(1)
+    expect(r.map((x) => [x.provider, x.account])).toEqual([["claude", "c1"], ["codex", "work"], ["codex", "e@x"]])
+    expect(pct5([r[0]!])).toBe(90)
+    expect(pct5([r[1]!])).toBe(80)
+    expect(r[2]!.error).toBe("boom")
   })
 })
 
 describe("backoff and stale values", () => {
-  const files = [{ provider: "codex", auth_index: "1", email: "a", raw: {} }]
-  const t0 = Date.parse("2026-10-08T10:00:00Z")
-  const usage = {
-    rate_limit: {
-      primary_window: { used_percent: 30, limit_window_seconds: 18000, reset_at: (t0 + 60 * 60000) / 1000 },
-      secondary_window: { used_percent: 50, limit_window_seconds: 604800, reset_at: (t0 + 3 * 86400000) / 1000 },
-    },
-  }
-
-  test("429 keeps last good values and pauses the account", async () => {
+  test("failure keeps last good values and pauses the account", async () => {
     clearCache()
     setMinInterval("codex", undefined) // isolate backoff from the min interval
-    let calls = 0
-    let fail = false
-    const api: Api = {
-      routerStatus: noRouter,
-      listAuthFiles: async () => files,
-      apiCall: async () => {
-        calls++
-        if (fail) throw new ApiError("upstream HTTP 429", 429)
-        return usage
-      },
-    }
-    const ok = await fetchAllQuotas(api, "k", true, t0)
-    expect(ok[0]!.windows[0]!.remainingPct).toBe(70)
-    expect(calls).toBe(1)
+    const s: CodexState = { calls: 0, used: 30 }
+    const api = mkApi(s)
+    expect(pct5(await fetchAllQuotas(api, "k", true, t0))).toBe(70)
 
-    fail = true
+    s.err = "upstream HTTP 429"
     const stale = await fetchAllQuotas(api, "k", true, t0 + 60_000)
-    expect(calls).toBe(2)
     expect(stale[0]!.error).toBeUndefined()
     expect(stale[0]!.staleSince).toBeDefined()
-    expect(stale[0]!.windows[0]!.remainingPct).toBe(70)
+    expect(pct5(stale)).toBe(70)
     expect(compactLine(CPA_PROVIDERS, stale, "codex")).toStartWith("codex 5h 70%")
 
-    // Within the backoff window: no upstream call, even with force.
-    await fetchAllQuotas(api, "k", true, t0 + 2 * 60_000)
-    expect(calls).toBe(2)
+    // Within the backoff window the account is not refreshed, even with force.
+    s.err = undefined
+    s.used = 10
+    const paused = await fetchAllQuotas(api, "k", true, t0 + 2 * 60_000)
+    expect(pct5(paused)).toBe(70)
+    expect(paused[0]!.staleSince).toBeDefined()
 
     // Backoff over: retried; it fails again (2nd failure → longer pause).
     // The 5h window has reset by now, so the stale view shows it full.
+    s.err = "upstream HTTP 429"
     const t61 = t0 + 61 * 60_000
     const later = await fetchAllQuotas(api, "k", true, t61)
-    expect(calls).toBe(3)
-    expect(later[0]!.windows.find((w) => w.label === "5h")!.remainingPct).toBe(100)
+    expect(pct5(later)).toBe(100)
 
     // Retry after the doubled pause succeeds and clears stale state.
-    fail = false
+    s.err = undefined
     const fresh = await fetchAllQuotas(api, "k", true, t61 + backoffMs(2) + 1)
-    expect(calls).toBe(4)
     expect(fresh[0]!.staleSince).toBeUndefined()
+    expect(pct5(fresh)).toBe(90)
     setMinInterval("codex", 15 * 60_000)
   })
 
-  const mkApi = (state: { calls: number; err?: ApiError }): Api => ({
-    routerStatus: noRouter,
-    listAuthFiles: async () => files,
-    apiCall: async () => {
-      state.calls++
-      if (state.err) throw state.err
-      return usage
-    },
-  })
-
-  test("min interval skips the request even with force, values are not stale", async () => {
+  test("min interval skips the account even with force, values are not stale", async () => {
     clearCache()
     setMinInterval("codex", 15 * 60_000)
-    const s = { calls: 0 }
+    const s: CodexState = { calls: 0, used: 30 }
     const api = mkApi(s)
     await fetchAllQuotas(api, "m", true, t0)
+    s.used = 50
     const again = await fetchAllQuotas(api, "m", true, t0 + 60_000)
-    expect(s.calls).toBe(1)
     expect(again[0]!.staleSince).toBeUndefined()
     expect(again[0]!.error).toBeUndefined()
-    expect(again[0]!.windows[0]!.remainingPct).toBe(70)
-    await fetchAllQuotas(api, "m", true, t0 + 15 * 60_000 + 1)
-    expect(s.calls).toBe(2)
-  })
-
-  test("Retry-After extends the pause", async () => {
-    clearCache()
-    setMinInterval("codex", undefined)
-    const s: { calls: number; err?: ApiError } = { calls: 0 }
-    const api = mkApi(s)
-    await fetchAllQuotas(api, "r", true, t0)
-    s.err = new ApiError("upstream HTTP 429", 429, false, 60 * 60_000)
-    await fetchAllQuotas(api, "r", true, t0 + 1000)
-    expect(s.calls).toBe(2)
-    await fetchAllQuotas(api, "r", true, t0 + 1000 + 30 * 60_000) // past 5 min backoff, inside Retry-After
-    expect(s.calls).toBe(2)
-    await fetchAllQuotas(api, "r", true, t0 + 1000 + 60 * 60_000 + 1)
-    expect(s.calls).toBe(3)
-    setMinInterval("codex", 15 * 60_000)
-  })
-
-  test("parseRetryAfter", () => {
-    expect(parseRetryAfter({ "Retry-After": ["120"] })).toBe(120_000)
-    expect(parseRetryAfter({ "retry-after": "7" })).toBe(7000)
-    const now = Date.parse("2026-10-08T10:00:00Z")
-    expect(parseRetryAfter({ "RETRY-AFTER": "Thu, 08 Oct 2026 10:01:00 GMT" }, now)).toBe(60_000)
-    expect(parseRetryAfter({ foo: "1" })).toBeUndefined()
-    expect(parseRetryAfter(undefined)).toBeUndefined()
+    expect(pct5(again)).toBe(70)
+    expect(pct5(await fetchAllQuotas(api, "m", true, t0 + 15 * 60_000 + 1))).toBe(50)
   })
 
   describe("persistence", () => {
@@ -275,26 +269,26 @@ describe("backoff and stale values", () => {
       setMinInterval("codex", 15 * 60_000)
       setStatePath(join(dir, "sub", "state.json"))
       clearCache()
-      const s: { calls: number; err?: ApiError } = { calls: 0 }
+      const s: CodexState = { calls: 0, used: 30 }
       const api = mkApi(s)
       await fetchAllQuotas(api, "p", true, t0)
-      expect(s.calls).toBe(1)
 
       // "restart": drop in-memory state, reload from file
       clearCache()
+      s.used = 50
       const r = await fetchAllQuotas(api, "p", true, t0 + 60_000)
-      expect(s.calls).toBe(1)
-      expect(r[0]!.windows[0]!.remainingPct).toBe(70)
+      expect(pct5(r)).toBe(70) // min interval honored from disk
       expect(r[0]!.windows[0]!.resetsAt).toBeInstanceOf(Date)
       expect(r[0]!.staleSince).toBeUndefined()
 
       // failure persists the pause too
-      s.err = new ApiError("upstream HTTP 429", 429)
+      s.err = "upstream HTTP 429"
       await fetchAllQuotas(api, "p", true, t0 + 16 * 60_000)
-      expect(s.calls).toBe(2)
       clearCache()
+      s.err = undefined
+      s.used = 10
       const after = await fetchAllQuotas(api, "p", true, t0 + 17 * 60_000)
-      expect(s.calls).toBe(2)
+      expect(pct5(after)).toBe(70)
       expect(after[0]!.staleSince).toBeDefined()
       setStatePath(undefined)
     })
@@ -307,33 +301,21 @@ describe("backoff and stale values", () => {
   })
 })
 
-// ---------- shared store, cross-process pauses, router-backed claude ----------
+// ---------- shared store, cross-process pauses ----------
 describe("process-wide store", () => {
-  const t0 = Date.parse("2026-10-08T10:00:00Z")
-  const codexFiles = [{ provider: "codex", auth_index: "1", email: "a", raw: {} }]
-  const usage = { rate_limit: { primary_window: { used_percent: 30, limit_window_seconds: 18000 } } }
-  const mk = (s: { calls: number }): Api => ({
-    routerStatus: noRouter,
-    listAuthFiles: async () => codexFiles,
-    apiCall: async () => {
-      s.calls++
-      return usage
-    },
-  })
-
   test("separately imported module copies share state", async () => {
     setStatePath(undefined)
     clearCache()
     setMinInterval("codex", 15 * 60_000)
     const c1: any = await import(("../../base.ts?copy=1") as string)
     const c2: any = await import(("../../base.ts?copy=2") as string)
-    const s = { calls: 0 }
-    const api = mk(s)
+    const s: CodexState = { calls: 0, used: 30 }
     getStore().registry.sources.clear()
-    registerQuotaSource(createCpaSource(api))
+    registerQuotaSource(createCpaSource(mkApi(s)))
     await c1.fetchAllQuotas(true, t0)
-    await c2.fetchAllQuotas(true, t0 + 60_000)
-    expect(s.calls).toBe(1)
+    s.used = 60
+    const r = await c2.fetchAllQuotas(true, t0 + 60_000)
+    expect(pct5(r.accounts)).toBe(70)
     const store = (globalThis as any)[Symbol.for("opencode-cpa-quota.state")]
     expect(store.accountState.has("cpa:codex:1")).toBe(true)
     setMinInterval("codex", undefined)
@@ -354,10 +336,9 @@ describe("process-wide store", () => {
       setStatePath(path)
       clearCache()
       setMinInterval("codex", undefined)
-      const s = { calls: 0 }
-      const api = mk(s)
+      const s: CodexState = { calls: 0, used: 30 }
+      const api = mkApi(s)
       await fetchAllQuotas(api, "xp", true, t0)
-      expect(s.calls).toBe(1)
       // another process records a failure with a future pause
       writeFileSync(
         path,
@@ -368,23 +349,23 @@ describe("process-wide store", () => {
           },
         }),
       )
+      s.used = 60
       const r = await fetchAllQuotas(api, "xp", true, t0 + 120_000)
-      expect(s.calls).toBe(1)
-      expect(r[0]!.windows[0]!.remainingPct).toBe(70)
+      expect(pct5(r)).toBe(70)
       expect(r[0]!.staleSince).toBeDefined()
       setStatePath(undefined)
     })
   })
 
   test("only one interval timer per process across plugin setups", async () => {
-    process.env.CPA_MANAGEMENT_KEY = "k"
+    process.env.CPA_QUOTA_KEY = "k"
     const realFetch = globalThis.fetch
     const realSet = globalThis.setInterval
     const realClear = globalThis.clearInterval
     let live = 0
     let created = 0
     const timers = new Set<unknown>()
-    globalThis.fetch = (async () => new Response(JSON.stringify({ files: [] }))) as any
+    globalThis.fetch = (async () => new Response(JSON.stringify({}))) as any
     globalThis.setInterval = ((fn: any, ms: any) => {
       const t = realSet(fn, 1e9)
       timers.add(t)
@@ -426,23 +407,16 @@ describe("process-wide store", () => {
   })
 })
 
-describe("claude from router status", () => {
+describe("claude from quota response", () => {
   const now = Date.parse("2026-10-08T10:00:00Z")
   const iso = (ms: number) => new Date(ms).toISOString()
-  const cf = (idx: string, email = idx) => ({ provider: "claude", auth_index: idx, email, raw: {} })
-  const mk = (files: any[], status: () => Promise<any>, apiCalls: string[] = []): Api => ({
-    listAuthFiles: async () => files,
-    routerStatus: status,
-    apiCall: async (i) => {
-      apiCalls.push(i.url)
-      return {}
-    },
+  const mk = (claude: () => any, calls: { n: number } = { n: 0 }): Api => ({
+    quota: async () => (calls.n++, { claude: claude(), codex: [] }),
   })
   const fresh = iso(now - 60_000)
 
   test("maps windows, rollover, extra, rejected, stale, missing", async () => {
     clearCache()
-    const calls: string[] = []
     const status = {
       accounts: [
         {
@@ -467,9 +441,7 @@ describe("claude from router status", () => {
         { auth_index: "d" },
       ],
     }
-    const files = [cf("a"), cf("b"), cf("c"), cf("d"), cf("zzz")]
-    const r = await fetchAllQuotas(mk(files, async () => status, calls), "cl", true, now)
-    expect(calls).toEqual([])
+    const r = await fetchAllQuotas(mk(() => status), "cl", true, now)
     expect(r.every((x) => x.provider === "claude")).toBe(true)
     expect(r[0]!.windows.map((w) => [w.label, w.remainingPct, w.detail])).toEqual([
       ["5h", 88, undefined],
@@ -487,42 +459,13 @@ describe("claude from router status", () => {
     expect(r[1]!.windows.at(-1)!.detail).toBe("$45.75 / $1000.00 · rejected")
     expect(r[2]!.error).toBe("boom")
     expect(r[3]!.error).toBe("no quota data yet")
-    expect(r[4]!.error).toBe("not in router status")
     expect(mapRouterAccount({ provider: "claude", account: "x" }, { extra_usage: { enabled: false } }, now).error).toBe("no quota data yet")
   })
 
-  test("router status is requested once for all claude accounts", async () => {
+  test("quota is requested once per poll for all accounts", async () => {
     clearCache()
-    let n = 0
-    await fetchAllQuotas(mk([cf("a"), cf("b")], async () => (n++, { accounts: [] })), "cl2", true, now)
-    expect(n).toBe(1)
-  })
-
-  test("router 404 is a per-account error", async () => {
-    clearCache()
-    const calls: string[] = []
-    const r = await fetchAllQuotas(
-      mk([cf("a")], async () => { throw new ApiError("router status HTTP 404", 404, true) }, calls),
-      "cl3", true, now,
-    )
-    expect(r[0]!.error).toBe("router status HTTP 404")
-    expect(calls).toEqual([])
-  })
-
-  test("management 401 propagates", async () => {
-    clearCache()
-    const err = new ApiError("router status HTTP 401", 401, true)
-    expect((await poll(mk([cf("a")], async () => { throw err }), true, now)).rejected).toBe("cpa: invalid key (401)")
-  })
-
-  test("createApi.routerStatus hits the plugin endpoint", async () => {
-    const urls: string[] = []
-    const fakeFetch = (async (u: string) => {
-      urls.push(u)
-      return new Response("{}", { status: 404 })
-    }) as any
-    const api = createApi({ url: "https://cpa.test", key: "k" }, fakeFetch)
-    await expect(api.routerStatus()).rejects.toMatchObject({ message: "router status HTTP 404", management: true })
-    expect(urls).toEqual(["https://cpa.test/v0/management/plugins/five-hour-quota-router/status"])
+    const calls = { n: 0 }
+    await fetchAllQuotas(mk(() => ({ accounts: [{ auth_index: "a" }, { auth_index: "b" }] }), calls), "cl2", true, now)
+    expect(calls.n).toBe(1)
   })
 })

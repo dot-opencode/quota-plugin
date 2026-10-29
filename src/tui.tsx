@@ -161,7 +161,7 @@ export default Plugin.define({
         const segments = (): Segment[] => {
           if (unavailable() && !snapshot()) return [{ text: "quota: n/a", tone: "stale" }]
           const snap = snapshot()
-          if (snap && !snap.configured) return [{ text: "quota: set CPA_MANAGEMENT_URL and CPA_MANAGEMENT_KEY", tone: "warn" }]
+          if (snap && !snap.configured) return [{ text: "quota: set CPA_URL and CPA_QUOTA_KEY", tone: "warn" }]
           const why = rejected()
           if (why) return [{ text: `quota: ${why}, paused — /quota to retry`, tone: "critical" }]
           const data = accounts()
@@ -191,9 +191,8 @@ export default Plugin.define({
     // "ok" button. The dialog host closes on Esc itself; Enter is bound here like in alert.
     // Opens immediately; shows cached data (or "Loading…") while a forced refresh runs.
     const MSG_UNAVAILABLE = "Failed to fetch quotas."
-    const MSG_NO_KEY = "Set CPA_MANAGEMENT_URL (or the url option) and CPA_MANAGEMENT_KEY in the environment."
-    const msgRejected = (why: string) =>
-      `Management API: ${why}. Check CPA_MANAGEMENT_KEY; after 5 failed attempts the proxy bans the IP for 30 minutes. Auto-refresh is paused.`
+    const MSG_NO_KEY = "Set CPA_URL (or the url option) and CPA_QUOTA_KEY in the environment."
+    const msgRejected = (why: string) => `Quota source rejected: ${why}. Auto-refresh is paused.`
     const showQuotaDialog = () => {
       const close = () => context.ui.dialog.clear()
       const [loading, setLoading] = createSignal(true)
@@ -220,7 +219,7 @@ export default Plugin.define({
           if (failedCall() || !snap) return MSG_UNAVAILABLE
           if (!snap.configured) return MSG_NO_KEY
           if (snap.rejected) return msgRejected(snap.rejected)
-          return "Failed to fetch quotas from the management API."
+          return "Failed to fetch quotas from CPA."
         }
         context.keymap.layer(() => ({
           mode: "modal",

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode CPA quota
 // @namespace    opencode-cpa-quota
-// @version      0.2.0
-// @description  Shows subscription quotas (Claude, Codex, Antigravity, Kimi) under the OpenCode V2 web composer. Requires the opencode-cpa-quota server plugin.
+// @version      0.3.0
+// @description  Shows subscription quotas (Claude, Codex) under the OpenCode V2 web composer. Requires the opencode-cpa-quota server plugin.
 // @match        http://127.0.0.1/*
 // @match        http://localhost/*
 // @grant        none
@@ -22,8 +22,6 @@
   const DEFAULT_PROVIDERS = [
     { id: "claude", providerIDs: ["claude"], modelPrefixes: ["claude"] },
     { id: "codex", providerIDs: ["codex"], modelPrefixes: ["gpt", "codex"], modelPattern: "^o[134](\\b|-|$)" },
-    { id: "antigravity", providerIDs: ["antigravity"], modelPrefixes: ["gemini"] },
-    { id: "kimi", providerIDs: ["kimi"], modelPrefixes: ["kimi"] },
   ]
   const LOGOS = logoData() // provider id → data: URL (generated block at the end of the file)
   const WARN_BELOW = 20
@@ -382,7 +380,7 @@
   function lineSegments() {
     const snap = state.snapshot
     if (state.unavailable && !snap) return [seg("quota: n/a", "stale")]
-    if (snap && !snap.configured) return [seg("quota: set CPA_MANAGEMENT_URL and CPA_MANAGEMENT_KEY", "warn")]
+    if (snap && !snap.configured) return [seg("quota: set CPA_URL and CPA_QUOTA_KEY", "warn")]
     if (snap && snap.rejected) return [seg(`quota: ${snap.rejected}, paused — click to retry`, "critical")]
     if (!snap || !snap.accounts) return [seg("quota …", "stale")]
     const list = compactSegments(snap.accounts, activeProvider, Date.now())
@@ -401,10 +399,9 @@
     if (snap && snap.accounts) return undefined
     if (state.loading) return "Loading…"
     if (state.failedCall || !snap) return "Failed to fetch quotas."
-    if (!snap.configured) return "Set CPA_MANAGEMENT_URL (or the url option) and CPA_MANAGEMENT_KEY in the environment."
-    if (snap.rejected)
-      return `Management API: ${snap.rejected}. Check CPA_MANAGEMENT_KEY; after 5 failed attempts the proxy bans the IP for 30 minutes. Auto-refresh is paused.`
-    return "Failed to fetch quotas from the management API."
+    if (!snap.configured) return "Set CPA_URL (or the url option) and CPA_QUOTA_KEY in the environment."
+    if (snap.rejected) return `Quota source rejected: ${snap.rejected}. Auto-refresh is paused.`
+    return "Failed to fetch quotas from CPA."
   }
 
   function renderAccount(provider, a, first) {

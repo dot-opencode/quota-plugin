@@ -1,6 +1,6 @@
 {
   "name": "opencode-cpa-quota",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "OpenCode plugin: CLIProxyAPI subscription quotas in the prompt footer",
   "license": "MIT",
   "repository": {
