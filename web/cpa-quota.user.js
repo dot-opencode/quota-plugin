@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode CPA quota
 // @namespace    opencode-cpa-quota
-// @version      0.3.0
+// @version      0.3.1
 // @description  Shows subscription quotas (Claude, Codex) under the OpenCode V2 web composer. Requires the opencode-cpa-quota server plugin.
 // @match        http://127.0.0.1/*
 // @match        http://localhost/*

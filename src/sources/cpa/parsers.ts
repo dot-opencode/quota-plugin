@@ -41,24 +41,20 @@ function rolled(label: string, pct: number, resetsAt: Date | undefined, now: num
 }
 
 function routerExtra(e: any, now: number): QuotaWindow | undefined {
-  if (!e || typeof e !== "object") return undefined
+  // Rejected extra usage is not available to the account, so it is not shown.
+  if (!e || typeof e !== "object" || e.status === "rejected") return undefined
   const used = num(e.used_credits)
   const limit = num(e.monthly_limit)
   const hasAmounts = used !== undefined && limit !== undefined && limit > 0
-  const rejected = e.status === "rejected"
   let pct = num(e.percent_used)
   if (pct === undefined && hasAmounts) pct = (used / limit) * 100
-  if (pct === undefined && rejected) pct = 100
   if (pct === undefined) return undefined
   const resetsAt = date(e.reset_at)
   const w = rolled("extra", pct, resetsAt, now)
   if (w.remainingPct === 100 && w.resetsAt === undefined && resetsAt && resetsAt.getTime() <= now) return w
   const currency = typeof e.currency === "string" && e.currency ? e.currency : "USD"
   const decimals = num(e.decimal_places) ?? 2
-  const parts: string[] = []
-  if (hasAmounts) parts.push(`${money(used, currency, decimals)} / ${money(limit, currency, decimals)}`)
-  if (rejected) parts.push("rejected")
-  if (parts.length) w.detail = parts.join(" · ")
+  if (hasAmounts) w.detail = `${money(used, currency, decimals)} / ${money(limit, currency, decimals)}`
   return w
 }
 

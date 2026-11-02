@@ -456,7 +456,7 @@ describe("claude from quota response", () => {
     expect(r[0]!.staleSince).toBeUndefined()
     expect(r[1]!.staleSince?.getTime()).toBe(now - 20 * 60_000)
     expect(r[1]!.staleReason).toBe("rate_limited: HTTP 429")
-    expect(r[1]!.windows.at(-1)!.detail).toBe("$45.75 / $1000.00 · rejected")
+    expect(r[1]!.windows.map((w) => w.label)).toEqual(["5h"])
     expect(r[2]!.error).toBe("boom")
     expect(r[3]!.error).toBe("no quota data yet")
     expect(mapRouterAccount({ provider: "claude", account: "x" }, { extra_usage: { enabled: false } }, now).error).toBe("no quota data yet")
