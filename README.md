@@ -2,7 +2,7 @@
 
 OpenCode V2 plugin (server + TUI): shows subscription quotas (Claude, Codex) from a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance in the prompt footer.
 
-Requirements: OpenCode V2, a CLIProxyAPI instance with the (updated) `five-hour-quota-router` CPA plugin, whose quota route this plugin reads. Its CPA config needs `plugins.configs.five-hour-quota-router.quota-api-keys: [...]`; the key you put there is `CPA_QUOTA_KEY`.
+Requirements: OpenCode V2 and CLIProxyAPI v8.0.58 with the standalone [quota-api](https://github.com/kurbezz/cpa-plugin-quota-api) CPA plugin. Its CPA config needs `plugins.configs.quota-api.quota-api-keys: [...]`; the key you put there is `CPA_QUOTA_KEY`. No CPA patch or quota-routing plugin is required.
 
 ## Architecture
 
@@ -30,17 +30,21 @@ For a local checkout, run `bun install` in the plugin dir (dev deps only; Solid/
 ## Env
 
 - `CPA_URL` (required unless the `url` option is set) — base URL of the CLIProxyAPI server, e.g. `https://cpa.example.com`.
-- `CPA_QUOTA_KEY` (required) — one of the keys in `plugins.configs.five-hour-quota-router.quota-api-keys`.
+- `CPA_QUOTA_KEY` (required) — one of the keys in `plugins.configs.quota-api.quota-api-keys`.
 
 Plugin options: `url` (overrides `CPA_URL`), `refreshSec` (default 300, minimum 30). Without a URL or key the footer shows `quota: set CPA_URL and CPA_QUOTA_KEY`.
 
 Both providers come from one request per poll:
-`GET {url}/v0/resource/plugins/five-hour-quota-router/quota` with `Authorization: Bearer <CPA_QUOTA_KEY>`.
-The response is `{ "claude": <router status>, "codex": [{ auth_index, email?, label?, usage?, error?, retry_after_ms?, fetched_at? }] }`;
-accounts come from the response (keyed by `auth_index`), and Codex `usage` is the raw
-`wham/usage` JSON. `401` shows `CPA quota key rejected (401)`, `404` means the
-`five-hour-quota-router` plugin must be updated and `quota-api-keys` configured; polling
-continues normally in both cases. When a Codex entry carries an `error` (e.g. 429), its last
+`GET {url}/v0/resource/plugins/quota-api/quota` with `Authorization: Bearer <CPA_QUOTA_KEY>`.
+The response contains `claude` and `codex` arrays. Each entry has
+`{ auth_index, email?, label?, usage?, error?, retry_after_ms?, fetched_at? }`.
+Accounts are keyed by `auth_index`; `usage` is raw provider JSON from Claude
+`/api/oauth/usage` or Codex `wham/usage`. Claude windows and extra usage are parsed
+locally; retained values are marked stale on refresh errors or when `fetched_at`
+is more than 15 minutes old. `401` shows `CPA quota key rejected (401)`;
+`404` means the `quota-api` plugin must be installed/enabled and its
+`quota-api-keys` configured. Polling continues normally in both cases.
+When a Codex entry carries an `error` (e.g. 429), its last
 known values stay on screen, and that account is retried after 5 min, doubling up to
 30 min (or `retry_after_ms`, if longer). `/quota` skips the 30 s result cache but
 respects these pauses. This state is persisted in
@@ -49,6 +53,13 @@ refresh, so restarts and other processes sharing the file see the same pauses.
 The server loads the plugin many times (each copy gets its own module instance), so all
 mutable state lives in one store on `globalThis[Symbol.for("opencode-cpa-quota.state")]`:
 one poller and one timer per process, regardless of the number of projects or copies.
+
+When migrating from `five-hour-quota-router`, install the standalone CPA plugin
+and copy the quota key to `plugins.configs.quota-api.quota-api-keys` first.
+`CPA_URL` and `CPA_QUOTA_KEY` do not change. This client no longer reads the old
+route or its Claude router-status format. The new CPA plugin owns provider
+refresh caching and pauses; `retry_after_ms` is the delay before another quota
+fetch, not the time until inference quota resets.
 
 ## Custom sources
 

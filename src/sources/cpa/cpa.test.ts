@@ -2,13 +2,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { ApiError, createApi, type Api, type CodexEntry } from "./api.ts"
+import { ApiError, createApi, type Api, type QuotaEntry } from "./api.ts"
 import { loadConfig } from "./config.ts"
 import { compactLine } from "../../format.ts"
 import { backoffMs, clearCache, fetchAllQuotas as fetchAll, setMinInterval, setStatePath } from "../../base.ts"
 import { registerQuotaSource } from "../../source.ts"
 import { getStore } from "../../store.ts"
-import { mapRouterAccount, parseCodex } from "./parsers.ts"
+import { mapClaudeAccount, parseCodex } from "./parsers.ts"
 import { createCpaSource, CPA_PROVIDERS } from "./index.ts"
 import type { AccountQuota } from "../../types.ts"
 
@@ -99,7 +99,7 @@ interface CodexState {
 const mkApi = (s: CodexState): Api => ({
   quota: async () => {
     s.calls++
-    const e: CodexEntry = { auth_index: "1", email: "a" }
+    const e: QuotaEntry = { auth_index: "1", email: "a" }
     if (!s.err || s.withUsage) e.usage = usageOf(s.used)
     if (s.err) e.error = s.err
     if (s.retryAfterMs) e.retry_after_ms = s.retryAfterMs
@@ -120,13 +120,14 @@ describe("quota route errors", () => {
     expect(n).toBe(2)
   })
 
-  test("404 asks to update the router plugin and configure quota-api-keys", async () => {
+  test("404 names the quota-api plugin configuration without a legacy retry", async () => {
     clearCache()
-    const api = createApi({ url: "https://cpa.test", key: "k" }, (async () => new Response("{}", { status: 404 })) as any)
+    let calls = 0
+    const api = createApi({ url: "https://cpa.test", key: "k" }, (async () => { calls++; return new Response("{}", { status: 404 }) }) as any)
     const r = await poll(api, true, t0)
     expect(r.rejected).toBeUndefined()
-    expect(r.accounts[0]!.error).toContain("five-hour-quota-router")
-    expect(r.accounts[0]!.error).toContain("quota-api-keys")
+    expect(r.accounts[0]!.error).toContain("plugins.configs.quota-api.quota-api-keys")
+    expect(calls).toBe(1)
   })
 
   test("other failures are plain errors", async () => {
@@ -140,11 +141,11 @@ describe("quota route errors", () => {
     const seen: { url: string; auth: string | null }[] = []
     const fakeFetch = (async (u: string, init: any) => {
       seen.push({ url: u, auth: new Headers(init.headers).get("authorization") })
-      return new Response(JSON.stringify({ claude: { accounts: [] }, codex: [] }))
+      return new Response(JSON.stringify({ claude: [], codex: [] }))
     }) as any
     const api = createApi({ url: "https://cpa.test", key: "k" }, fakeFetch)
-    expect(await api.quota()).toEqual({ claude: { accounts: [] }, codex: [] })
-    expect(seen).toEqual([{ url: "https://cpa.test/v0/resource/plugins/five-hour-quota-router/quota", auth: "Bearer k" }])
+    expect(await api.quota()).toEqual({ claude: [], codex: [] })
+    expect(seen).toEqual([{ url: "https://cpa.test/v0/resource/plugins/quota-api/quota", auth: "Bearer k" }])
     const bad = createApi({ url: "https://cpa.test", key: "k" }, (async () => new Response("", { status: 401 })) as any)
     await expect(bad.quota()).rejects.toMatchObject({ message: "CPA quota key rejected (401)", status: 401 })
   })
@@ -190,7 +191,7 @@ describe("codex entries", () => {
       quota: async () => (
         n++,
         {
-          claude: { accounts: [{ auth_index: "c1", windows: [{ scope: "five_hour", percent_used: 10, sampled_at: new Date(t0 - 1000).toISOString() }] }] },
+          claude: [{ auth_index: "c1", usage: { five_hour: { utilization: 10 } }, fetched_at: new Date(t0 - 1000).toISOString() }],
           codex: [{ auth_index: 7, label: "work", usage: usageOf(20) } as any, { auth_index: "8", email: "e@x", error: "boom" }],
         }
       ),
@@ -415,57 +416,117 @@ describe("claude from quota response", () => {
   })
   const fresh = iso(now - 60_000)
 
-  test("maps windows, rollover, extra, rejected, stale, missing", async () => {
-    clearCache()
-    const status = {
-      accounts: [
-        {
-          auth_index: "a",
-          windows: [
-            { scope: "sonnet_weekly", percent_used: 40, reset_at: iso(now + 1e6), sampled_at: fresh },
-            { scope: "weekly", percent_used: 25, reset_at: iso(now + 2e6), sampled_at: fresh },
-            { scope: "five_hour", percent_used: 12, reset_at: iso(now + 3e6), sampled_at: fresh },
-            { scope: "fable_weekly", percent_used: 10, reset_at: iso(now - 1000), sampled_at: fresh },
-            { scope: "opus_weekly", percent_used: 150, sampled_at: fresh },
-            { scope: "haiku_weekly", percent_used: 5, sampled_at: fresh },
-          ],
-          extra_usage: { percent_used: 4.6, reset_at: iso(now + 5e6), status: "allowed", enabled: true, used_credits: 4575, monthly_limit: 100000, currency: "USD", decimal_places: 2, sampled_at: fresh },
-        },
-        {
-          auth_index: "b",
-          windows: [{ scope: "five_hour", percent_used: 50, sampled_at: iso(now - 20 * 60_000) }],
-          extra_usage: { percent_used: 100, status: "rejected", enabled: true, used_credits: 4575, monthly_limit: 100000, sampled_at: iso(now - 20 * 60_000) },
-          last_refresh_error: "rate_limited: HTTP 429",
-        },
-        { auth_index: "c", windows: [], last_refresh_error: "boom" },
-        { auth_index: "d" },
-      ],
-    }
-    const r = await fetchAllQuotas(mk(() => status), "cl", true, now)
-    expect(r.every((x) => x.provider === "claude")).toBe(true)
-    expect(r[0]!.windows.map((w) => [w.label, w.remainingPct, w.detail])).toEqual([
-      ["5h", 88, undefined],
-      ["7d", 75, undefined],
-      ["7d fable", 100, undefined],
-      ["7d opus", 0, undefined],
-      ["7d sonnet", 60, undefined],
-      ["haiku weekly", 95, undefined],
-      ["extra", 95.4, "$45.75 / $1000.00"],
+  const map = (usage: unknown, entry: Record<string, unknown> = {}) =>
+    mapClaudeAccount({ provider: "claude", account: "x" }, { usage, ...entry }, now)
+
+  test("raw legacy windows preserve order, clamp finite percentages and roll known resets", () => {
+    const r = map({
+      seven_day_sonnet: { utilization: 40 }, seven_day: { utilization: 25 },
+      five_hour: { utilization: 12, resets_at: iso(now + 3e6) },
+      seven_day_fable: { utilization: 10, resets_at: iso(now) },
+      seven_day_opus: { utilization: 150 }, haiku_weekly: { utilization: 5 },
+    })
+    expect(r.windows.map(w => [w.label, w.remainingPct])).toEqual([
+      ["5h", 88], ["7d", 75], ["7d fable", 100], ["7d opus", 0], ["7d sonnet", 60],
     ])
-    expect(r[0]!.windows[0]!.resetsAt?.getTime()).toBe(now + 3e6)
-    expect(r[0]!.staleSince).toBeUndefined()
-    expect(r[1]!.staleSince?.getTime()).toBe(now - 20 * 60_000)
-    expect(r[1]!.staleReason).toBe("rate_limited: HTTP 429")
-    expect(r[1]!.windows.map((w) => w.label)).toEqual(["5h"])
-    expect(r[2]!.error).toBe("boom")
-    expect(r[3]!.error).toBe("no quota data yet")
-    expect(mapRouterAccount({ provider: "claude", account: "x" }, { extra_usage: { enabled: false } }, now).error).toBe("no quota data yet")
+    expect(r.windows[0]!.resetsAt?.getTime()).toBe(now + 3e6)
+    expect(r.windows[2]!.resetsAt).toBeUndefined()
+    expect(r.windows[4]!.resetsAt).toBeUndefined()
+    expect(map({ five_hour: { utilization: -5 } }).windows[0]!.remainingPct).toBe(100)
+  })
+
+  test("valid limits override only their legacy scope and duplicate scopes merge conservatively", () => {
+    const r = map({
+      five_hour: { utilization: 10 }, seven_day: { utilization: 25 }, seven_day_opus: { utilization: 5 },
+      limits: [
+        { kind: " session ", percent: 30, resets_at: iso(now + 1e6) },
+        { kind: "session", utilization: 40, resets_at: iso(now + 2e6) },
+        { kind: "weekly_all", percent: "bad" },
+        { kind: "weekly_scoped", percent: 20, resets_at: iso(now + 1e6), scope: { model: { id: "claude-opus-4" } } },
+        { kind: "weekly_scoped", percent: 50, scope: { model: { display_name: "Claude Opus 4" } } },
+        { kind: "weekly_scoped", utilization: 15, scope: { model: { id: "claude-sonnet-4" } } },
+        { kind: "weekly_scoped", percent: 99, scope: { model: { id: "opus", display_name: "Sonnet" } } },
+        { kind: "weekly_scoped", percent: 99, scope: { model: { id: "megasonnet" } } },
+        { kind: "other", percent: 99 }, null,
+      ],
+    })
+    expect(r.windows.map(w => [w.label, w.remainingPct])).toEqual([["5h", 60], ["7d", 75], ["7d opus", 50], ["7d sonnet", 85]])
+    expect(r.windows[0]!.resetsAt?.getTime()).toBe(now + 2e6)
+    expect(r.windows[2]!.resetsAt).toBeUndefined()
+  })
+
+  test("malformed newer reset cannot replace a valid legacy scope", () => {
+    expect(map({ five_hour: { utilization: 10 }, limits: [
+      { kind: "session", percent: 90, resets_at: "not-a-date" },
+    ] }).windows.map(w => [w.label, w.remainingPct])).toEqual([["5h", 90]])
+    expect(map({ seven_day: { utilization: 20, resets_at: {} } }).windows).toEqual([])
+  })
+
+  test("extra uses raw utilization or valid money ratio, never router metadata", () => {
+    const extra = (e: unknown) => map({ extra_usage: e }).windows
+    expect(extra({ is_enabled: true, utilization: 4.6, used_credits: 4575, monthly_limit: 100000, currency: "USD", decimal_places: 2 }))
+      .toEqual([{ label: "extra", remainingPct: 95.4, detail: "$45.75 / $1000.00" }])
+    expect(extra({ is_enabled: true, used_credits: 250, monthly_limit: 1000, currency: "eur", decimal_places: 1 }))
+      .toEqual([{ label: "extra", remainingPct: 75, detail: "25.0 EUR / 100.0 EUR" }])
+    for (const decimal_places of [1e100, -1, 1.5, 7]) {
+      expect(extra({ is_enabled: true, used_credits: 250, monthly_limit: 1000, decimal_places })[0]!.detail).toBe("$2.50 / $10.00")
+    }
+    expect(extra({ is_enabled: true, utilization: 200 })[0]!.remainingPct).toBe(0)
+    for (const e of [undefined, null, { utilization: 10 }, { is_enabled: false, utilization: 10 },
+      { is_enabled: true, utilization: -1, used_credits: -5, monthly_limit: 100 },
+      { is_enabled: true, monthly_limit: 0, used_credits: 10 },
+      { is_enabled: true, percent_used: 10, reset_at: iso(now + 1e6), status: "allowed" }]) {
+      expect(extra(e)).toEqual([])
+    }
+    expect(extra({ is_enabled: true, utilization: 20, reset_at: iso(now - 1e6) })[0]!.remainingPct).toBe(80)
+  })
+
+  test("fetched_at alone marks usage stale after 15 minutes, not at the boundary", () => {
+    const usage = { five_hour: { utilization: 20 } }
+    expect(map(usage, { fetched_at: iso(now - 15 * 60_000) }).staleSince).toBeUndefined()
+    expect(map(usage, { fetched_at: iso(now - 15 * 60_000 - 1) }).staleSince?.getTime()).toBe(now - 15 * 60_000 - 1)
+    expect(map(usage, { fetched_at: "bad" }).staleSince).toBeUndefined()
+  })
+
+  test("first poll preserves error-plus-usage as stale for fresh, old and invalid fetched_at", async () => {
+    for (const fetched_at of [fresh, iso(now - 20 * 60_000), "bad", undefined]) {
+      clearCache()
+      const r = await fetchAllQuotas(mk(() => [{ auth_index: "a", usage: { five_hour: { utilization: 30 } }, fetched_at, error: "HTTP 429" }]), "", true, now)
+      expect(r[0]!.windows[0]!.remainingPct).toBe(70)
+      expect(r[0]!.error).toBeUndefined()
+      expect(r[0]!.staleReason).toBe("HTTP 429")
+      expect(r[0]!.staleSince?.getTime()).toBe(fetched_at && fetched_at !== "bad" ? Date.parse(fetched_at) : now)
+    }
+  })
+
+  test("error-only entries expose server error and only positive finite retry delays", async () => {
+    for (const retry_after_ms of [60_000, 0, -1, Infinity, NaN]) {
+      const source = createCpaSource(mk(() => [{ auth_index: "a", error: "missing_token", retry_after_ms }]), "cpa", () => now)
+      const refs = await source.listAccounts()
+      expect((await source.fetch(refs)).get("a")).toEqual({ error: "missing_token", retryAfterMs: retry_after_ms === 60_000 ? 60_000 : undefined })
+    }
+  })
+
+  test("malformed optional values do not crash or invent windows", async () => {
+    for (const usage of [null, false, [], "bad", { five_hour: null, seven_day: { utilization: Infinity }, limits: [null, false, { kind: "session", percent: NaN }], extra_usage: { is_enabled: true, utilization: Infinity } }]) {
+      expect(map(usage).windows).toEqual([])
+    }
+    for (const body of [null, [], "bad", { claude: {}, codex: false }]) {
+      const api = createApi({ url: "https://cpa.test", key: "k" }, (async () => new Response(JSON.stringify(body))) as any)
+      expect(await createCpaSource(api).listAccounts()).toEqual([])
+    }
+  })
+
+  test("Claude array names prefer email then label then stable auth_index", async () => {
+    const source = createCpaSource(mk(() => [null, {}, { auth_index: "" },
+      { auth_index: "a", email: "mail", label: "label" }, { auth_index: "b", label: "work" }, { auth_index: "c" }]))
+    expect((await source.listAccounts()).map(r => [r.key, r.account])).toEqual([["a", "mail"], ["b", "work"], ["c", "c"]])
   })
 
   test("quota is requested once per poll for all accounts", async () => {
     clearCache()
     const calls = { n: 0 }
-    await fetchAllQuotas(mk(() => ({ accounts: [{ auth_index: "a" }, { auth_index: "b" }] }), calls), "cl2", true, now)
+    await fetchAllQuotas(mk(() => [{ auth_index: "a" }, { auth_index: "b" }], calls), "cl2", true, now)
     expect(calls.n).toBe(1)
   })
 })

@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url"
 import type { AccountRef, FetchResult, ProviderMeta, QuotaSource } from "../../source.ts"
-import { ApiError, type Api, type CodexEntry, type QuotaResponse } from "./api.ts"
-import { mapRouterAccount, parseCodex } from "./parsers.ts"
+import { ApiError, type Api, type QuotaEntry, type QuotaResponse } from "./api.ts"
+import { mapClaudeAccount, parseCodex } from "./parsers.ts"
 
 const logo = (id: string) => fileURLToPath(new URL(`../../../assets/${id}.png`, import.meta.url))
 
@@ -16,10 +16,10 @@ const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v 
 
 function claudeRefs(res: QuotaResponse): AccountRef[] {
   const out: AccountRef[] = []
-  for (const a of Array.isArray(res.claude?.accounts) ? res.claude.accounts : []) {
+  for (const a of Array.isArray(res.claude) ? res.claude : []) {
     if (a?.auth_index === undefined || a?.auth_index === null || String(a.auth_index) === "") continue
     const key = String(a.auth_index)
-    out.push({ provider: "claude", key, account: str(a.email) ?? str(a.label) ?? str(a.name) ?? key, data: a })
+    out.push({ provider: "claude", key, account: str(a.email) ?? str(a.label) ?? key, data: a })
   }
   return out
 }
@@ -34,7 +34,7 @@ function codexRefs(res: QuotaResponse): AccountRef[] {
   return out
 }
 
-function codexResult(e: CodexEntry): FetchResult {
+function codexResult(e: QuotaEntry): FetchResult {
   const error = str(e.error)
   const retryAfterMs = typeof e.retry_after_ms === "number" && e.retry_after_ms > 0 ? e.retry_after_ms : undefined
   if (e.usage === undefined || e.usage === null) return { error: error ?? "no usage data", retryAfterMs }
@@ -68,10 +68,10 @@ export function createCpaSource(api: Api, id = "cpa", clock: () => number = Date
         if (ref.key === CONFIG_ERROR_KEY) {
           out.set(ref.key, { error: String(ref.data) })
         } else if (ref.provider === "claude") {
-          const { provider: _p, account: _a, ...q } = mapRouterAccount({ provider: ref.provider, account: ref.account }, ref.data, now)
-          out.set(ref.key, q)
+          const { provider: _p, account: _a, ...q } = mapClaudeAccount({ provider: ref.provider, account: ref.account }, ref.data, now)
+          out.set(ref.key, q.error ? { error: q.error, retryAfterMs: q.retryAfterMs } : q)
         } else if (ref.provider === "codex") {
-          out.set(ref.key, codexResult(ref.data as CodexEntry))
+          out.set(ref.key, codexResult(ref.data as QuotaEntry))
         }
       }
       return out

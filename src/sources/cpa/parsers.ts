@@ -19,77 +19,96 @@ const pick = (o: any, ...keys: string[]) => {
   return undefined
 }
 
-// ---------- claude (from the five-hour-quota-router CPA plugin) ----------
+// ---------- claude (raw OAuth usage from quota-api) ----------
 /** Formats an amount given in minor units (cents), e.g. 1234 → "$12.34". */
 function money(minor: number, currency = "USD", decimals = 2): string {
   const v = (minor / 10 ** decimals).toFixed(decimals)
   return currency.toUpperCase() === "USD" ? `$${v}` : `${v} ${currency.toUpperCase()}`
 }
 
-const ROUTER_SCOPES: [string, string][] = [
+const CLAUDE_SCOPES: [string, string][] = [
   ["five_hour", "5h"],
-  ["weekly", "7d"],
-  ["fable_weekly", "7d fable"],
-  ["opus_weekly", "7d opus"],
-  ["sonnet_weekly", "7d sonnet"],
+  ["seven_day", "7d"],
+  ["seven_day_fable", "7d fable"],
+  ["seven_day_opus", "7d opus"],
+  ["seven_day_sonnet", "7d sonnet"],
 ]
-const ROUTER_STALE_MS = 15 * 60_000
+const CLAUDE_STALE_MS = 15 * 60_000
 
 function rolled(label: string, pct: number, resetsAt: Date | undefined, now: number): QuotaWindow {
   if (resetsAt && resetsAt.getTime() <= now) return { label, remainingPct: 100 }
   return { label, remainingPct: clamp(100 - pct), resetsAt }
 }
 
-function routerExtra(e: any, now: number): QuotaWindow | undefined {
-  // Rejected extra usage is not available to the account, so it is not shown.
-  if (!e || typeof e !== "object" || e.status === "rejected") return undefined
+function claudeExtra(e: any): QuotaWindow | undefined {
+  if (!e || typeof e !== "object" || e.is_enabled !== true) return undefined
   const used = num(e.used_credits)
   const limit = num(e.monthly_limit)
-  const hasAmounts = used !== undefined && limit !== undefined && limit > 0
-  let pct = num(e.percent_used)
+  const hasAmounts = used !== undefined && used >= 0 && limit !== undefined && limit > 0
+  let pct = num(e.utilization)
+  if (pct !== undefined && pct < 0) pct = undefined
   if (pct === undefined && hasAmounts) pct = (used / limit) * 100
   if (pct === undefined) return undefined
-  const resetsAt = date(e.reset_at)
-  const w = rolled("extra", pct, resetsAt, now)
-  if (w.remainingPct === 100 && w.resetsAt === undefined && resetsAt && resetsAt.getTime() <= now) return w
+  const w: QuotaWindow = { label: "extra", remainingPct: clamp(100 - pct) }
   const currency = typeof e.currency === "string" && e.currency ? e.currency : "USD"
-  const decimals = num(e.decimal_places) ?? 2
+  const places = num(e.decimal_places)
+  const decimals = places !== undefined && Number.isInteger(places) && places >= 0 && places <= 6 ? places : 2
   if (hasAmounts) w.detail = `${money(used, currency, decimals)} / ${money(limit, currency, decimals)}`
   return w
 }
 
-/** Maps one `accounts[]` entry of the router status to an account result. */
-export function mapRouterAccount(base: { provider: string; account: string }, a: any, now: number): AccountQuota {
-  const windows: (QuotaWindow & { order: number })[] = []
-  const samples: number[] = []
-  const sample = (v: unknown) => {
-    const d = date(v)
-    if (d) samples.push(d.getTime())
+function scopedFamily(model: any): string | undefined {
+  const tokens = [model?.id, model?.display_name]
+    .filter((v): v is string => typeof v === "string")
+    .join(" ").toLowerCase().split(/[^a-z0-9]+/)
+  const families = ["fable", "opus", "sonnet"].filter(f => tokens.includes(f))
+  return families.length === 1 ? families[0] : undefined
+}
+
+/** Maps one Claude quota-api entry, including server-cached usage on refresh errors. */
+export function mapClaudeAccount(base: { provider: string; account: string }, a: any, now: number): AccountQuota & { retryAfterMs?: number } {
+  const usage = a?.usage
+  type WindowValue = { pct: number; resetsAt?: Date }
+  const value = (w: any, newer = false): WindowValue | undefined => {
+    const pct = num(newer ? pick(w, "percent", "utilization") : w?.utilization)
+    if (pct === undefined) return undefined
+    // A missing reset is allowed; a malformed window must not override legacy data.
+    const resetsAt = typeof w?.resets_at === "string" ? date(w.resets_at) : undefined
+    if (w?.resets_at !== undefined && w.resets_at !== null && !resetsAt) return undefined
+    return { pct: clamp(pct), resetsAt }
   }
-  for (const w of Array.isArray(a?.windows) ? a.windows : []) {
-    const scope = typeof w?.scope === "string" ? w.scope : ""
-    const pct = num(w?.percent_used)
-    if (!scope || pct === undefined) continue
-    const idx = ROUTER_SCOPES.findIndex(([k]) => k === scope)
-    const label = idx >= 0 ? ROUTER_SCOPES[idx]![1] : scope.replace(/_/g, " ")
-    windows.push({ ...rolled(label, pct, date(w.reset_at), now), order: idx >= 0 ? idx : ROUTER_SCOPES.length })
-    sample(w.sampled_at)
+  const newer = new Map<string, WindowValue>()
+  for (const w of Array.isArray(usage?.limits) ? usage.limits : []) {
+    const kind = typeof w?.kind === "string" ? w.kind.trim().toLowerCase() : ""
+    const family = kind === "weekly_scoped" ? scopedFamily(w?.scope?.model) : undefined
+    const key = kind === "session" ? "five_hour" : kind === "weekly_all" ? "seven_day" : family ? `seven_day_${family}` : undefined
+    const next = value(w, true)
+    if (!key || !next) continue
+    const prior = newer.get(key)
+    if (prior) {
+      next.pct = Math.max(prior.pct, next.pct)
+      next.resetsAt = prior.resetsAt && next.resetsAt
+        ? new Date(Math.max(prior.resetsAt.getTime(), next.resetsAt.getTime())) : undefined
+    }
+    newer.set(key, next)
   }
-  windows.sort((x, y) => x.order - y.order)
-  const out: QuotaWindow[] = windows.map(({ order: _o, ...w }) => w)
-  const extra = routerExtra(a?.extra_usage, now)
-  if (extra) {
-    out.push(extra)
-    sample(a.extra_usage.sampled_at)
-    sample(a.extra_usage.amounts_sampled_at)
+  const windows: QuotaWindow[] = []
+  for (const [key, label] of CLAUDE_SCOPES) {
+    const w = newer.get(key) ?? value(usage?.[key])
+    if (w) windows.push(rolled(label, w.pct, w.resetsAt, now))
   }
-  const refreshError = typeof a?.last_refresh_error === "string" && a.last_refresh_error ? a.last_refresh_error : undefined
-  if (!out.length) return { ...base, windows: [], error: refreshError ?? "no quota data yet" }
-  const newest = samples.length ? Math.max(...samples) : undefined
-  if (newest !== undefined && now - newest > ROUTER_STALE_MS) {
-    return { ...base, windows: out, staleSince: new Date(newest), staleReason: refreshError }
+  const extra = claudeExtra(usage?.extra_usage)
+  if (extra) windows.push(extra)
+  const error = typeof a?.error === "string" && a.error ? a.error : undefined
+  if (!windows.length) {
+    const retryAfterMs = typeof a?.retry_after_ms === "number" && Number.isFinite(a.retry_after_ms) && a.retry_after_ms > 0 ? a.retry_after_ms : undefined
+    return { ...base, windows, error: error ?? "no quota data yet", ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) }
   }
-  return { ...base, windows: out }
+  const fetchedAt = typeof a?.fetched_at === "string" ? date(a.fetched_at) : undefined
+  if (error || (fetchedAt && now - fetchedAt.getTime() > CLAUDE_STALE_MS)) {
+    return { ...base, windows, staleSince: fetchedAt ?? new Date(now), staleReason: error }
+  }
+  return { ...base, windows }
 }
 
 // ---------- codex ----------
