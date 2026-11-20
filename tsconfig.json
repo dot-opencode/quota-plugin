@@ -5,13 +5,13 @@
     "moduleResolution": "Bundler",
     "lib": ["ESNext", "DOM"],
     "jsx": "preserve",
-    "jsxImportSource": "@opentui/solid",
-    "types": ["bun"],
+    "jsxImportSource": "solid-js",
+    "types": ["bun", "vite/client"],
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src"]
+  "include": ["src", "vite.config.ts"]
 }

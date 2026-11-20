@@ -1,6 +1,6 @@
 # opencode-cpa-quota
 
-OpenCode V2 plugin (server + TUI): shows subscription quotas (Claude, Codex) from a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance in the prompt footer.
+OpenCode V2 plugin (server + TUI + GUI): shows subscription quotas (Claude, Codex) from a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance in the TUI prompt footer and the GUI composer.
 
 Requirements: OpenCode V2 and CLIProxyAPI v8.0.58 with the standalone [quota-api](https://github.com/kurbezz/cpa-plugin-quota-api) CPA plugin. Its CPA config needs `plugins.configs.quota-api.quota-api-keys: [...]`; the key you put there is `CPA_QUOTA_KEY`. No CPA patch or quota-routing plugin is required.
 
@@ -10,18 +10,19 @@ Requirements: OpenCode V2 and CLIProxyAPI v8.0.58 with the standalone [quota-api
 - **Sources** (`src/source.ts`, public as `opencode-cpa-quota/source`): a `QuotaSource` lists accounts and fetches quotas for them; sources are independent (one failing never blocks another). The registry lives on `globalThis`, see below.
 - **Built-in CPA source** (`src/sources/cpa/`): the CLIProxyAPI implementation (quota route client, Claude/Codex parsers). The server plugin registers it when both the URL and key are present.
 - **TUI plugin** (`tui.tsx` → `src/tui.tsx`) only displays: it calls `get` once, listens to `changed`, and `/quota` calls `get({ force: true })`. If the server plugin isn't loaded, the footer shows `quota: n/a`.
+- **GUI plugin** (`src/gui.tsx` → `dist/gui-experimental.cjs`) uses the same RPC and formatting helpers for a composer pill and `/quota` refresh command. It listens to `changed` and also reads the snapshot every 5 minutes as a fallback.
 
 The env vars below are read by the server plugin (the OpenCode server process).
 
 ## Install
 
-The package exposes both `./server` and `./tui` entries. Add it to `plugins` in `opencode.json(c)`; the CLI picks up the `./tui` entry automatically:
+The package exposes `./server`, `./tui`, and `./gui-experimental` entries. Add it to `plugins` in `opencode.json(c)`; the CLI picks up the `./tui` entry automatically:
 
 ```json
 { "plugins": ["github:dot-opencode/quota-plugin#release"] }
 ```
 
-The `release` branch points at the latest tagged release. A local checkout path works too.
+The `release` branch contains the latest tagged source plus the prebuilt GUI bundle. A local checkout path works too.
 
 Without the server entry the footer shows `quota: n/a`. Server options (`url`, `refreshSec`) go into the same entry: `{ "package": "...", "options": { ... } }`.
 
@@ -98,18 +99,19 @@ Registering a source with an existing id replaces it. The registry is stored on 
 The footer shows e.g. `claude 5h 64% · 7d 95%` for the current model's provider (all providers when unknown).
 `/quota` (or the command palette) shows the full report with reset times.
 
-## Web UI (userscript)
+## Desktop / Web UI
 
-`web/cpa-quota.user.js` shows the same quota line under the composer in the OpenCode V2 web UI; click it for the full report (this also forces a refresh).
-Install it with Tampermonkey or Violentmonkey: create a new script and paste the file, or open the raw file URL (it is also attached to each GitHub release).
-Its `@match` lines cover `http://127.0.0.1/*` and `http://localhost/*` on any port; if you open the web UI on another host, add a `@match` line for it.
-It needs the server plugin: it reads quotas from the `cpa-quota` RPC and event stream of the same server, and shows `quota: n/a` without it.
+The experimental GUI part needs the plugin listed in your global `opencode.json(c)`, not just `cli.json`. Open the pill above the composer for per-account quotas and reset times. Choose **Refresh** in the pill or run `/quota` to force a refresh.
+
+OpenCode 2.3.2 loads configured GUI plugins in Desktop only; its standalone web UI does not load them. Desktop 2.3.2 uses the built-in status icon because its GUI SDK does not support custom plugin icons yet.
+
+The `release` branch ships the bundle. For a local checkout, run `bun install` followed by `bun run build` before loading the plugin.
 
 ## Dev
 
-`bun install`, then `bun test` and `bun run typecheck` (CI runs both).
+`bun install`, then `bun test`, `bun run typecheck`, and `bun run build` (CI runs all three).
 
-Release: bump `version` in `package.json`, then push a `v<version>` tag. The workflow checks the tag, runs the tests, publishes a GitHub release and moves the `release` branch to the tag.
+Release: bump `version` in `package.json`, then push a `v<version>` tag. The workflow checks the tag, typechecks and tests the source, builds the GUI bundle, and publishes a GitHub release. It force-updates the `release` branch to a commit on top of the tag that includes `dist/`.
 
 ## License
 

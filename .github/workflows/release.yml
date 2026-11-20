@@ -32,9 +32,18 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2.2.0
+      - run: bun install --frozen-lockfile
+      - run: bun run build
       - uses: softprops/action-gh-release@v3.0.3
         with:
-          files: web/cpa-quota.user.js
           generate_release_notes: true
-      - name: Move release branch to the tagged commit
-        run: git push origin "+$GITHUB_SHA:refs/heads/release"
+      - name: Publish the tagged source and GUI bundle to the release branch
+        run: |
+          git config user.name github-actions
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f dist
+          git commit -m "Build GUI bundle for $GITHUB_REF_NAME"
+          git push origin +HEAD:refs/heads/release
