@@ -36,7 +36,7 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2.2.0
       - run: bun install --frozen-lockfile
-      - run: bun run build
+      - run: bun run build:gui
       - uses: softprops/action-gh-release@v3.0.3
         with:
           generate_release_notes: true

@@ -1,6 +1,6 @@
 {
   "name": "opencode-cpa-quota",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "OpenCode plugin: CLIProxyAPI subscription quotas in the TUI and GUI",
   "license": "MIT",
   "repository": {
@@ -29,7 +29,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "vite build"
+    "build:gui": "vite build"
   },
   "dependencies": {
     "@opencode/plugin": "2.3.2"

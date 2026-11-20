@@ -105,11 +105,11 @@ The experimental GUI part needs the plugin listed in your global `opencode.json(
 
 OpenCode 2.3.2 loads configured GUI plugins in Desktop only; its standalone web UI does not load them. Desktop 2.3.2 uses the built-in status icon because its GUI SDK does not support custom plugin icons yet.
 
-The `release` branch ships the bundle. For a local checkout, run `bun install` followed by `bun run build` before loading the plugin.
+The `release` branch ships the bundle. For a local checkout, run `bun install` followed by `bun run build:gui` before loading the plugin.
 
 ## Dev
 
-`bun install`, then `bun test`, `bun run typecheck`, and `bun run build` (CI runs all three).
+`bun install`, then `bun test`, `bun run typecheck`, and `bun run build:gui` (CI runs all three). The script is not named `build`: npm would then try to prepare the git dependency on install..
 
 Release: bump `version` in `package.json`, then push a `v<version>` tag. The workflow checks the tag, typechecks and tests the source, builds the GUI bundle, and publishes a GitHub release. It force-updates the `release` branch to a commit on top of the tag that includes `dist/`.
 
